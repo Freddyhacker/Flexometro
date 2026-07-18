@@ -1,0 +1,725 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Medidor de Figuras — Visión en tiempo real</title>
+<style>
+  :root{
+    --bg:#0B0D10;
+    --panel:#12161B;
+    --panel-2:#181D24;
+    --line:#242B33;
+    --text:#E8ECEF;
+    --muted:#8A93A0;
+    --accent:#7CFFB2;
+    --accent-2:#4C9BFF;
+    --warn:#FF6B57;
+    --mono: ui-monospace, "Cascadia Code", "SF Mono", Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, system-ui, sans-serif;
+  }
+  *{box-sizing:border-box; -webkit-tap-highlight-color:transparent;}
+  html,body{height:100%; margin:0; overscroll-behavior:none;}
+  body{
+    background:var(--bg); color:var(--text); font-family:var(--sans);
+    overflow:hidden; position:fixed; inset:0;
+  }
+  #stage{
+    position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+    background:#000;
+  }
+  #canvas{
+    max-width:100%; max-height:100%; width:auto; height:100%;
+    touch-action:none; cursor:crosshair;
+  }
+  /* Viewfinder corner brackets — signature element */
+  .bracket{ position:absolute; width:28px; height:28px; border:2.5px solid var(--accent);
+    opacity:.85; filter:drop-shadow(0 0 6px rgba(124,255,178,.5)); pointer-events:none; transition:opacity .3s;}
+  .bracket.tl{ top:64px; left:14px; border-right:none; border-bottom:none; }
+  .bracket.tr{ top:64px; right:14px; border-left:none; border-bottom:none; }
+  .bracket.bl{ bottom:150px; left:14px; border-right:none; border-top:none; }
+  .bracket.br{ bottom:150px; right:14px; border-left:none; border-top:none; }
+  .bracket.dim{ opacity:.25; }
+
+  #topbar{
+    position:absolute; top:0; left:0; right:0; z-index:5;
+    display:flex; align-items:center; justify-content:space-between; gap:10px;
+    padding:calc(10px + env(safe-area-inset-top)) 14px 10px;
+    background:linear-gradient(to bottom, rgba(0,0,0,.75), rgba(0,0,0,0));
+  }
+  #calStatus{ font-family:var(--mono); font-size:12.5px; color:var(--muted); display:flex; align-items:center; gap:6px;}
+  #calStatus .dot{ width:7px; height:7px; border-radius:50%; background:var(--warn); }
+  #calStatus.ok .dot{ background:var(--accent); box-shadow:0 0 6px var(--accent);}
+  #calStatus.ok{ color:var(--accent); }
+  select#unitSelect{
+    background:var(--panel-2); color:var(--text); border:1px solid var(--line); border-radius:8px;
+    padding:6px 8px; font-family:var(--mono); font-size:13px;
+  }
+
+  .hint{
+    position:absolute; top:56px; left:0; right:0; z-index:6; text-align:center;
+    font-size:13px; color:var(--bg); background:var(--accent); margin:0 auto; width:fit-content;
+    padding:8px 14px; border-radius:999px; font-weight:600; box-shadow:0 4px 14px rgba(0,0,0,.4);
+  }
+  .hidden{ display:none !important; }
+
+  #panel{
+    position:absolute; left:0; right:0; bottom:0; z-index:5;
+    background:rgba(18,22,27,.92); backdrop-filter:blur(10px);
+    border-top:1px solid var(--line);
+    border-radius:18px 18px 0 0;
+    padding:10px 14px calc(12px + env(safe-area-inset-bottom));
+    max-height:46vh; display:flex; flex-direction:column;
+  }
+  .panel-handle{ width:36px; height:4px; background:var(--line); border-radius:99px; margin:0 auto 10px; }
+  .controls-row{ display:flex; gap:8px; margin-bottom:10px; flex-wrap:wrap; }
+  .btn{
+    flex:1; min-width:110px; background:var(--panel-2); color:var(--text); border:1px solid var(--line);
+    border-radius:10px; padding:10px 10px; font-family:var(--sans); font-size:13px; font-weight:600;
+    display:flex; align-items:center; justify-content:center; gap:6px;
+  }
+  .btn:active{ transform:scale(.97); }
+  .btn.primary{ background:var(--accent); color:#04170D; border-color:var(--accent); }
+  .btn.active{ background:var(--accent-2); color:#051424; border-color:var(--accent-2); }
+  .slider-row{ display:flex; align-items:center; gap:10px; font-size:12px; color:var(--muted); margin-bottom:10px;}
+  .slider-row input[type=range]{ flex:1; accent-color:var(--accent); }
+
+  #shapeList{ overflow-y:auto; flex:1; display:flex; flex-direction:column; gap:8px; }
+  .shape-card{
+    background:var(--panel-2); border:1px solid var(--line); border-left:4px solid var(--accent);
+    border-radius:10px; padding:9px 12px;
+  }
+  .shape-card .name{ font-weight:700; font-size:13.5px; margin-bottom:3px; }
+  .shape-card .metrics{ font-family:var(--mono); font-size:12px; color:var(--muted); line-height:1.5; }
+  .shape-card .metrics b{ color:var(--text); }
+  .empty-state{ color:var(--muted); font-size:13px; text-align:center; padding:18px 8px; line-height:1.5;}
+
+  #modalOverlay{
+    position:fixed; inset:0; background:rgba(0,0,0,.6); z-index:20;
+    display:flex; align-items:center; justify-content:center; padding:20px;
+  }
+  #modal{
+    background:var(--panel); border:1px solid var(--line); border-radius:16px; padding:20px;
+    width:100%; max-width:340px;
+  }
+  #modal h3{ margin:0 0 6px; font-size:16px; }
+  #modal p{ margin:0 0 14px; font-size:13px; color:var(--muted); line-height:1.5;}
+  .modal-row{ display:flex; gap:8px; margin-bottom:14px; }
+  #modal input[type=number]{
+    flex:1; background:var(--panel-2); border:1px solid var(--line); color:var(--text);
+    border-radius:8px; padding:10px; font-family:var(--mono); font-size:15px;
+  }
+  #modal select{
+    background:var(--panel-2); border:1px solid var(--line); color:var(--text);
+    border-radius:8px; padding:10px; font-family:var(--mono); font-size:15px;
+  }
+  .modal-actions{ display:flex; gap:8px; }
+
+  #startOverlay{
+    position:fixed; inset:0; background:var(--bg); z-index:30; display:flex; flex-direction:column;
+    align-items:center; justify-content:center; text-align:center; padding:30px; gap:16px;
+  }
+  #startOverlay h1{ font-size:22px; margin:0; }
+  #startOverlay p{ color:var(--muted); font-size:14px; max-width:320px; line-height:1.6; margin:0;}
+  #startOverlay .btn{ flex:none; padding:14px 26px; font-size:15px; }
+</style>
+</head>
+<body>
+
+<div id="startOverlay">
+  <h1>📐 Medidor de Figuras</h1>
+  <p>Activa la cámara para detectar círculos, cuadrados, rectángulos y otras figuras en tiempo real y obtener sus medidas.</p>
+  <button class="btn primary" id="btnStart">Activar cámara</button>
+  <p id="startError" style="color:var(--warn)"></p>
+</div>
+
+<div id="stage">
+  <video id="video" playsinline autoplay muted style="display:none"></video>
+  <canvas id="canvas"></canvas>
+  <div class="bracket tl"></div>
+  <div class="bracket tr"></div>
+  <div class="bracket bl"></div>
+  <div class="bracket br"></div>
+</div>
+
+<div id="topbar">
+  <div id="calStatus"><span class="dot"></span><span id="calStatusText">Sin calibrar</span></div>
+  <select id="unitSelect">
+    <option value="mm">mm</option>
+    <option value="cm" selected>cm</option>
+    <option value="m">m</option>
+  </select>
+</div>
+
+<div class="hint hidden" id="calibHint">Toca dos puntos de una distancia conocida</div>
+
+<div id="panel">
+  <div class="panel-handle"></div>
+  <div class="controls-row">
+    <button class="btn primary" id="btnCalibrate">Calibrar escala</button>
+    <button class="btn" id="btnInvert">Fondo oscuro: OFF</button>
+  </div>
+  <div class="slider-row">
+    <span>Sensibilidad</span>
+    <input type="range" id="areaSlider" min="1" max="100" value="35">
+  </div>
+  <div id="shapeList">
+    <div class="empty-state">Apunta la cámara a una figura (círculo, cuadrado, rectángulo…) sobre un fondo liso y con buena luz. Calibra primero con una regla o cuadrícula de referencia para obtener medidas reales.</div>
+  </div>
+</div>
+
+<div id="modalOverlay" class="hidden">
+  <div id="modal">
+    <h3>Distancia real</h3>
+    <p>¿Cuánto mide en la realidad la distancia entre los dos puntos que marcaste?</p>
+    <div class="modal-row">
+      <input type="number" id="modalValue" inputmode="decimal" placeholder="Ej: 5" step="any">
+      <select id="modalUnit">
+        <option value="mm">mm</option>
+        <option value="cm" selected>cm</option>
+        <option value="m">m</option>
+      </select>
+    </div>
+    <div class="modal-actions">
+      <button class="btn" id="modalCancel">Cancelar</button>
+      <button class="btn primary" id="modalConfirm">Calibrar</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(function(){
+"use strict";
+
+/* ======================= NÚCLEO DE VISIÓN (JS puro, sin librerías) ======================= */
+
+function otsuThreshold(gray){
+  const hist = new Array(256).fill(0);
+  for (let i=0;i<gray.length;i++) hist[gray[i]]++;
+  const total = gray.length;
+  let sum=0; for (let t=0;t<256;t++) sum += t*hist[t];
+  let sumB=0, wB=0, varMax=0, threshold=127;
+  for (let t=0;t<256;t++){
+    wB += hist[t];
+    if (wB===0) continue;
+    const wF = total-wB;
+    if (wF===0) break;
+    sumB += t*hist[t];
+    const mB = sumB/wB, mF = (sum-sumB)/wF;
+    const between = wB*wF*(mB-mF)*(mB-mF);
+    if (between>varMax){ varMax=between; threshold=t; }
+  }
+  return threshold;
+}
+
+function labelComponents(binary,w,h,minArea,maxArea){
+  const labels = new Int32Array(w*h).fill(-1);
+  const comps = [];
+  const stack = new Int32Array(w*h);
+  for (let y=0;y<h;y++){
+    for (let x=0;x<w;x++){
+      const idx = y*w+x;
+      if (binary[idx]!==1 || labels[idx]!==-1) continue;
+      let sp=0;
+      stack[sp++]=idx;
+      labels[idx]=comps.length;
+      let count=0, minX=x,maxX=x,minY=y,maxY=y, seedX=x, seedY=y;
+      while (sp>0){
+        const cur = stack[--sp];
+        const cx = cur % w, cy = (cur / w) | 0;
+        count++;
+        if (cx<minX) minX=cx; if (cx>maxX) maxX=cx;
+        if (cy<minY) minY=cy; if (cy>maxY) maxY=cy;
+        if (cy<seedY || (cy===seedY && cx<seedX)){ seedX=cx; seedY=cy; }
+        for (let ny=cy-1; ny<=cy+1; ny++){
+          if (ny<0||ny>=h) continue;
+          for (let nx=cx-1; nx<=cx+1; nx++){
+            if (nx<0||nx>=w) continue;
+            const nidx = ny*w+nx;
+            if (binary[nidx]===1 && labels[nidx]===-1){
+              labels[nidx]=comps.length;
+              stack[sp++]=nidx;
+            }
+          }
+        }
+      }
+      if (count>=minArea && count<=maxArea){
+        comps.push({area:count, bbox:[minX,minY,maxX,maxY], seed:{x:seedX,y:seedY}});
+      }
+    }
+  }
+  return comps;
+}
+
+function traceContour(binary,w,h,start){
+  const dx8=[1,1,0,-1,-1,-1,0,1];
+  const dy8=[0,1,1,1,0,-1,-1,-1];
+  const isFg=(x,y)=> x>=0&&y>=0&&x<w&&y<h&&binary[y*w+x]===1;
+  const dirIndex=(from,to)=>{
+    const dx=to.x-from.x, dy=to.y-from.y;
+    for (let i=0;i<8;i++) if (dx8[i]===dx && dy8[i]===dy) return i;
+    return 0;
+  };
+  const contour=[];
+  let current={x:start.x,y:start.y};
+  let b={x:start.x-1,y:start.y};
+  const first=current;
+  const maxSteps=w*h;
+  let steps=0;
+  contour.push(current);
+  do{
+    const dir = dirIndex(current,b);
+    let found=false;
+    for (let i=1;i<=8;i++){
+      const ndir=(dir+i)%8;
+      const nx=current.x+dx8[ndir], ny=current.y+dy8[ndir];
+      if (isFg(nx,ny)){
+        b={x:current.x+dx8[(ndir+7)%8], y:current.y+dy8[(ndir+7)%8]};
+        current={x:nx,y:ny};
+        found=true;
+        break;
+      }
+    }
+    if (!found) break;
+    contour.push(current);
+    steps++;
+    if (steps>maxSteps) break;
+  } while(!(current.x===first.x && current.y===first.y));
+  return contour;
+}
+
+function polygonArea(points){
+  let a=0;
+  for (let i=0;i<points.length;i++){
+    const p1=points[i], p2=points[(i+1)%points.length];
+    a += p1.x*p2.y - p2.x*p1.y;
+  }
+  return Math.abs(a)/2;
+}
+function polygonPerimeter(points){
+  let p=0;
+  for (let i=0;i<points.length;i++){
+    const p1=points[i], p2=points[(i+1)%points.length];
+    p += Math.hypot(p2.x-p1.x, p2.y-p1.y);
+  }
+  return p;
+}
+function dist(a,b){ return Math.hypot(a.x-b.x, a.y-b.y); }
+function perpDist(pt,a,b){
+  const dx=b.x-a.x, dy=b.y-a.y;
+  const len=Math.hypot(dx,dy);
+  if (len===0) return Math.hypot(pt.x-a.x, pt.y-a.y);
+  return Math.abs(dy*pt.x - dx*pt.y + b.x*a.y - b.y*a.x)/len;
+}
+function douglasPeucker(points,epsilon){
+  if (points.length<3) return points.slice();
+  let maxD=0, idx=0;
+  for (let i=1;i<points.length-1;i++){
+    const d=perpDist(points[i],points[0],points[points.length-1]);
+    if (d>maxD){ maxD=d; idx=i; }
+  }
+  if (maxD>epsilon){
+    const left=douglasPeucker(points.slice(0,idx+1),epsilon);
+    const right=douglasPeucker(points.slice(idx),epsilon);
+    return left.slice(0,-1).concat(right);
+  }
+  return [points[0], points[points.length-1]];
+}
+function simplifyClosed(points,epsilon){
+  if (points.length<5) return points;
+  const n=points.length;
+  const step=Math.max(1, Math.floor(n/200));
+  let iA=0, iB=0, best=-1;
+  for (let i=0;i<n;i+=step){
+    for (let j=i+1;j<n;j+=step){
+      const d=dist(points[i],points[j]);
+      if (d>best){ best=d; iA=i; iB=j; }
+    }
+  }
+  if (iA>iB) [iA,iB]=[iB,iA];
+  const open1=douglasPeucker(points.slice(iA,iB+1),epsilon);
+  const open2=douglasPeucker(points.slice(iB).concat(points.slice(0,iA+1)),epsilon);
+  return open1.slice(0,-1).concat(open2.slice(0,-1));
+}
+function angleAt(p0,p1,p2){
+  const v1={x:p0.x-p1.x,y:p0.y-p1.y}, v2={x:p2.x-p1.x,y:p2.y-p1.y};
+  const dot=v1.x*v2.x+v1.y*v2.y;
+  const m1=Math.hypot(v1.x,v1.y), m2=Math.hypot(v2.x,v2.y);
+  if (m1===0||m2===0) return 90;
+  let cos=dot/(m1*m2);
+  cos=Math.max(-1,Math.min(1,cos));
+  return Math.acos(cos)*180/Math.PI;
+}
+
+function classifyShape(contour){
+  const area=polygonArea(contour);
+  const perimeter=polygonPerimeter(contour);
+  const circularity = perimeter>0 ? (4*Math.PI*area)/(perimeter*perimeter) : 0;
+  const epsilon=Math.max(1.5, 0.02*perimeter);
+  const simplified=simplifyClosed(contour,epsilon);
+  const v=simplified.length;
+
+  let type='poligono', sideLengths=null;
+
+  if (circularity>0.82 && v>=7){
+    type='circulo';
+  } else if (v===3){
+    type='triangulo';
+    sideLengths=[
+      dist(simplified[0],simplified[1]),
+      dist(simplified[1],simplified[2]),
+      dist(simplified[2],simplified[0]),
+    ];
+  } else if (v===4){
+    const s=[dist(simplified[0],simplified[1]), dist(simplified[1],simplified[2]),
+             dist(simplified[2],simplified[3]), dist(simplified[3],simplified[0])];
+    const angles=[
+      angleAt(simplified[3],simplified[0],simplified[1]),
+      angleAt(simplified[0],simplified[1],simplified[2]),
+      angleAt(simplified[1],simplified[2],simplified[3]),
+      angleAt(simplified[2],simplified[3],simplified[0]),
+    ];
+    const rightAngled = angles.every(a=>Math.abs(a-90)<15);
+    const w1=(s[0]+s[2])/2, h1=(s[1]+s[3])/2;
+    const maxS=Math.max(w1,h1), minS=Math.min(w1,h1);
+    if (rightAngled && maxS/minS<1.15){ type='cuadrado'; sideLengths=[ (w1+h1)/2 ]; }
+    else if (rightAngled){ type='rectangulo'; sideLengths=[w1,h1]; }
+    else { type='cuadrilatero'; sideLengths=s; }
+  } else if (v===5){ type='pentagono'; }
+  else if (v===6){ type='hexagono'; }
+
+  return { type, sides:v, area, perimeter, circularity, simplified, sideLengths };
+}
+
+/* ======================= APP ======================= */
+
+const video = document.getElementById('video');
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d', { willReadFrequently:true });
+const startOverlay = document.getElementById('startOverlay');
+const btnStart = document.getElementById('btnStart');
+const startError = document.getElementById('startError');
+const calStatus = document.getElementById('calStatus');
+const calStatusText = document.getElementById('calStatusText');
+const unitSelect = document.getElementById('unitSelect');
+const btnCalibrate = document.getElementById('btnCalibrate');
+const btnInvert = document.getElementById('btnInvert');
+const areaSlider = document.getElementById('areaSlider');
+const shapeList = document.getElementById('shapeList');
+const calibHint = document.getElementById('calibHint');
+const modalOverlay = document.getElementById('modalOverlay');
+const modalValue = document.getElementById('modalValue');
+const modalUnit = document.getElementById('modalUnit');
+const modalConfirm = document.getElementById('modalConfirm');
+const modalCancel = document.getElementById('modalCancel');
+const brackets = document.querySelectorAll('.bracket');
+
+const UNIT_TO_MM = { mm:1, cm:10, m:1000 };
+const TYPE_LABEL = {
+  circulo:'Círculo', cuadrado:'Cuadrado', rectangulo:'Rectángulo', triangulo:'Triángulo',
+  cuadrilatero:'Cuadrilátero', pentagono:'Pentágono', hexagono:'Hexágono'
+};
+const COLORS = ['#7CFFB2','#4C9BFF','#FFC24C','#FF6B9D','#B98CFF','#5CE1E6'];
+
+const state = {
+  pxPerMM: null,
+  unit: 'cm',
+  invert: false,
+  sensitivity: 35, // 1..100 -> fraction of frame area used as min blob size
+  calibrating: false,
+  calibPoints: [],
+  lastShapes: [],
+  lastDetectTime: 0,
+};
+
+loadPrefs();
+
+function loadPrefs(){
+  try{
+    const raw = localStorage.getItem('shapeMeterPrefs');
+    if (raw){
+      const p = JSON.parse(raw);
+      if (p.pxPerMM) state.pxPerMM = p.pxPerMM;
+      if (p.unit) state.unit = p.unit;
+      if (typeof p.invert === 'boolean') state.invert = p.invert;
+      if (p.sensitivity) state.sensitivity = p.sensitivity;
+    }
+  }catch(e){}
+  unitSelect.value = state.unit;
+  areaSlider.value = state.sensitivity;
+  updateInvertBtn();
+  updateCalStatus();
+}
+function savePrefs(){
+  try{
+    localStorage.setItem('shapeMeterPrefs', JSON.stringify({
+      pxPerMM: state.pxPerMM, unit: state.unit, invert: state.invert, sensitivity: state.sensitivity
+    }));
+  }catch(e){}
+}
+
+function updateCalStatus(){
+  if (state.pxPerMM){
+    calStatus.classList.add('ok');
+    calStatusText.textContent = 'Calibrado ('+state.pxPerMM.toFixed(2)+' px/mm)';
+  } else {
+    calStatus.classList.remove('ok');
+    calStatusText.textContent = 'Sin calibrar — medidas en píxeles';
+  }
+}
+function updateInvertBtn(){
+  btnInvert.textContent = 'Fondo oscuro: ' + (state.invert ? 'ON' : 'OFF');
+  btnInvert.classList.toggle('active', state.invert);
+}
+
+/* ---------- Cámara ---------- */
+btnStart.addEventListener('click', async () => {
+  try{
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal:'environment' }, width:{ideal:1280}, height:{ideal:720} },
+      audio:false
+    });
+    video.srcObject = stream;
+    await video.play();
+    video.addEventListener('loadedmetadata', setupCanvas, {once:true});
+    if (video.videoWidth) setupCanvas();
+    startOverlay.classList.add('hidden');
+    requestAnimationFrame(loop);
+  }catch(err){
+    startError.textContent = 'No se pudo acceder a la cámara: ' + err.message + '. Revisa los permisos del navegador.';
+  }
+});
+
+function setupCanvas(){
+  const targetW = 640;
+  const aspect = video.videoHeight / video.videoWidth;
+  canvas.width = targetW;
+  canvas.height = Math.round(targetW * aspect);
+}
+
+/* ---------- Bucle principal ---------- */
+function loop(ts){
+  requestAnimationFrame(loop);
+  if (!video.videoWidth) return;
+  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+  if (!state.lastDetectTime || ts - state.lastDetectTime > 220){
+    state.lastDetectTime = ts;
+    try { runDetection(); } catch(e){ /* seguir sin romper el loop */ }
+  }
+
+  drawOverlays();
+  drawCalibrationMarks();
+}
+
+function grayscaleFrom(imgData){
+  const d = imgData.data;
+  const n = imgData.width*imgData.height;
+  const gray = new Uint8Array(n);
+  for (let i=0,p=0;i<n;i++,p+=4){
+    gray[i] = (0.299*d[p] + 0.587*d[p+1] + 0.114*d[p+2])|0;
+  }
+  return gray;
+}
+
+function runDetection(){
+  const w = canvas.width, h = canvas.height;
+  const imgData = ctx.getImageData(0,0,w,h);
+  const gray = grayscaleFrom(imgData);
+  const threshold = otsuThreshold(gray);
+
+  const binary = new Uint8Array(w*h);
+  for (let i=0;i<gray.length;i++){
+    const isDark = gray[i] < threshold;
+    binary[i] = (state.invert ? !isDark : isDark) ? 1 : 0;
+  }
+
+  const total = w*h;
+  const minArea = total * (0.0004 + (state.sensitivity/100)*0.02);
+  const maxArea = total * 0.75;
+
+  const comps = labelComponents(binary, w, h, minArea, maxArea);
+  const shapes = [];
+  for (const c of comps.slice(0,12)){
+    const contour = traceContour(binary, w, h, c.seed);
+    if (contour.length < 8) continue;
+    const result = classifyShape(contour);
+    shapes.push({ contour, result, bbox:c.bbox });
+  }
+  state.lastShapes = shapes;
+  renderShapeList(shapes);
+}
+
+/* ---------- Conversión de unidades ---------- */
+function lenToUnit(px){
+  if (!state.pxPerMM) return { value:px, unit:'px' };
+  const mm = px / state.pxPerMM;
+  const val = mm / UNIT_TO_MM[state.unit];
+  return { value: val, unit: state.unit };
+}
+function areaToUnit(px2){
+  if (!state.pxPerMM) return { value:px2, unit:'px²' };
+  const mm2 = px2 / (state.pxPerMM*state.pxPerMM);
+  const val = mm2 / (UNIT_TO_MM[state.unit]*UNIT_TO_MM[state.unit]);
+  return { value: val, unit: state.unit+'²' };
+}
+function fmt(n){
+  if (n >= 100) return n.toFixed(1);
+  if (n >= 10) return n.toFixed(2);
+  return n.toFixed(3);
+}
+
+/* ---------- Dibujo ---------- */
+function drawOverlays(){
+  state.lastShapes.forEach((s, i) => {
+    const color = COLORS[i % COLORS.length];
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    const c = s.contour;
+    ctx.moveTo(c[0].x, c[0].y);
+    for (let k=1;k<c.length;k+=2) ctx.lineTo(c[k].x, c[k].y);
+    ctx.closePath();
+    ctx.stroke();
+
+    const cx = (s.bbox[0]+s.bbox[2])/2, cy = (s.bbox[1]+s.bbox[3])/2;
+    const label = (i+1) + ' ' + (TYPE_LABEL[s.result.type] || ('Polígono '+s.result.sides+'L'));
+    ctx.font = '600 13px ui-monospace, monospace';
+    const textW = ctx.measureText(label).width;
+    ctx.fillStyle = 'rgba(0,0,0,.6)';
+    ctx.fillRect(cx-textW/2-6, cy-10, textW+12, 20);
+    ctx.fillStyle = color;
+    ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillText(label, cx, cy);
+  });
+}
+
+function drawCalibrationMarks(){
+  if (state.calibPoints.length === 0) return;
+  ctx.fillStyle = '#4C9BFF';
+  ctx.strokeStyle = '#4C9BFF';
+  ctx.lineWidth = 2;
+  state.calibPoints.forEach(p=>{
+    ctx.beginPath(); ctx.arc(p.x,p.y,6,0,Math.PI*2); ctx.fill();
+  });
+  if (state.calibPoints.length === 2){
+    ctx.beginPath();
+    ctx.moveTo(state.calibPoints[0].x, state.calibPoints[0].y);
+    ctx.lineTo(state.calibPoints[1].x, state.calibPoints[1].y);
+    ctx.stroke();
+  }
+}
+
+/* ---------- Panel de resultados ---------- */
+function renderShapeList(shapes){
+  if (shapes.length === 0){
+    shapeList.innerHTML = '<div class="empty-state">No se detecta ninguna figura clara. Acerca el objeto, mejora la luz o ajusta la sensibilidad.</div>';
+    return;
+  }
+  shapeList.innerHTML = shapes.map((s,i)=>{
+    const r = s.result;
+    const color = COLORS[i % COLORS.length];
+    const name = TYPE_LABEL[r.type] || ('Polígono de ' + r.sides + ' lados');
+    let rows = '';
+    const u = state.pxPerMM ? state.unit : 'px';
+
+    if (r.type === 'circulo'){
+      const radius = lenToUnit(r.perimeter/(2*Math.PI));
+      const diameter = lenToUnit(r.perimeter/Math.PI);
+      const circ = lenToUnit(r.perimeter);
+      const area = areaToUnit(r.area);
+      rows = row('Diámetro', diameter) + row('Radio', radius) + row('Circunferencia', circ) + row('Área', area);
+    } else if (r.type === 'cuadrado'){
+      const side = lenToUnit(r.sideLengths[0]);
+      const perim = lenToUnit(r.sideLengths[0]*4);
+      const area = areaToUnit(r.area);
+      rows = row('Lado', side) + row('Perímetro', perim) + row('Área', area);
+    } else if (r.type === 'rectangulo'){
+      const a = lenToUnit(r.sideLengths[0]), b = lenToUnit(r.sideLengths[1]);
+      const perim = lenToUnit(2*(r.sideLengths[0]+r.sideLengths[1]));
+      const area = areaToUnit(r.area);
+      rows = row('Base', a) + row('Altura', b) + row('Perímetro', perim) + row('Área', area);
+    } else if (r.type === 'triangulo'){
+      const [a,b,c] = r.sideLengths.map(lenToUnit);
+      const perim = lenToUnit(r.sideLengths[0]+r.sideLengths[1]+r.sideLengths[2]);
+      const area = areaToUnit(r.area);
+      rows = row('Lado a', a) + row('Lado b', b) + row('Lado c', c) + row('Perímetro', perim) + row('Área', area);
+    } else {
+      const perim = lenToUnit(r.perimeter);
+      const area = areaToUnit(r.area);
+      rows = row('Nº lados', {value:r.sides, unit:''}) + row('Perímetro', perim) + row('Área', area);
+    }
+
+    return '<div class="shape-card" style="border-left-color:'+color+'">'
+      + '<div class="name" style="color:'+color+'">'+(i+1)+'. '+name+'</div>'
+      + '<div class="metrics">'+rows+'</div></div>';
+  }).join('');
+}
+function row(label, m){
+  const val = typeof m.value === 'number' ? fmt(m.value) : m.value;
+  return label + ': <b>' + val + (m.unit ? ' '+m.unit : '') + '</b><br>';
+}
+
+/* ---------- Calibración ---------- */
+btnCalibrate.addEventListener('click', ()=>{
+  state.calibrating = true;
+  state.calibPoints = [];
+  calibHint.classList.remove('hidden');
+  brackets.forEach(b=>b.classList.add('dim'));
+});
+
+canvas.addEventListener('pointerdown', (e)=>{
+  if (!state.calibrating) return;
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = canvas.width / rect.width;
+  const scaleY = canvas.height / rect.height;
+  const x = (e.clientX - rect.left) * scaleX;
+  const y = (e.clientY - rect.top) * scaleY;
+  state.calibPoints.push({x,y});
+  if (state.calibPoints.length === 2){
+    modalOverlay.classList.remove('hidden');
+    modalValue.focus();
+  }
+});
+
+modalConfirm.addEventListener('click', ()=>{
+  const val = parseFloat(modalValue.value);
+  if (!val || val<=0){ modalValue.focus(); return; }
+  const unit = modalUnit.value;
+  const pxDist = dist(state.calibPoints[0], state.calibPoints[1]);
+  const realMM = val * UNIT_TO_MM[unit];
+  state.pxPerMM = pxDist / realMM;
+  savePrefs();
+  updateCalStatus();
+  closeCalibration();
+});
+modalCancel.addEventListener('click', closeCalibration);
+
+function closeCalibration(){
+  modalOverlay.classList.add('hidden');
+  modalValue.value='';
+  state.calibrating=false;
+  state.calibPoints=[];
+  calibHint.classList.add('hidden');
+  brackets.forEach(b=>b.classList.remove('dim'));
+}
+
+/* ---------- Controles ---------- */
+unitSelect.addEventListener('change', ()=>{
+  state.unit = unitSelect.value;
+  savePrefs(); updateCalStatus();
+});
+btnInvert.addEventListener('click', ()=>{
+  state.invert = !state.invert;
+  updateInvertBtn();
+  savePrefs();
+});
+areaSlider.addEventListener('input', ()=>{
+  state.sensitivity = parseInt(areaSlider.value,10);
+  savePrefs();
+});
+
+})();
+</script>
+</body>
+</html>
