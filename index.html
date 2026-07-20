@@ -193,6 +193,121 @@
 
 /* ======================= NÚCLEO DE VISIÓN (JS puro, sin librerías) ======================= */
 
+function boxBlur(gray,w,h){
+  const out = new Uint8Array(w*h);
+  for (let y=0;y<h;y++){
+    for (let x=0;x<w;x++){
+      let sum=0,count=0;
+      for (let dy=-1;dy<=1;dy++){
+        const ny=y+dy; if (ny<0||ny>=h) continue;
+        for (let dx=-1;dx<=1;dx++){
+          const nx=x+dx; if (nx<0||nx>=w) continue;
+          sum += gray[ny*w+nx]; count++;
+        }
+      }
+      out[y*w+x] = (sum/count)|0;
+    }
+  }
+  return out;
+}
+
+function dilate(bin,w,h){
+  const out = new Uint8Array(w*h);
+  for (let y=0;y<h;y++){
+    for (let x=0;x<w;x++){
+      let v=0;
+      outer:
+      for (let dy=-1;dy<=1;dy++){
+        const ny=y+dy; if (ny<0||ny>=h) continue;
+        for (let dx=-1;dx<=1;dx++){
+          const nx=x+dx; if (nx<0||nx>=w) continue;
+          if (bin[ny*w+nx]===1){ v=1; break outer; }
+        }
+      }
+      out[y*w+x]=v;
+    }
+  }
+  return out;
+}
+function erode(bin,w,h){
+  const out = new Uint8Array(w*h);
+  for (let y=0;y<h;y++){
+    for (let x=0;x<w;x++){
+      let v=1;
+      outer:
+      for (let dy=-1;dy<=1;dy++){
+        const ny=y+dy;
+        if (ny<0||ny>=h){ v=0; break outer; }
+        for (let dx=-1;dx<=1;dx++){
+          const nx=x+dx;
+          if (nx<0||nx>=w || bin[ny*w+nx]===0){ v=0; break outer; }
+        }
+      }
+      out[y*w+x]=v;
+    }
+  }
+  return out;
+}
+function morphClean(bin,w,h){
+  // cierre (dilatar+erosionar): rellena huequitos dentro de la figura
+  let out = erode(dilate(bin,w,h),w,h);
+  // apertura (erosionar+dilatar): elimina motitas de ruido sueltas
+  out = dilate(erode(out,w,h),w,h);
+  return out;
+}
+
+function resampleContour(points, spacing){
+  const n = points.length;
+  if (n<3) return points;
+  const cum = new Float64Array(n+1);
+  for (let i=0;i<n;i++) cum[i+1] = cum[i] + dist(points[i], points[(i+1)%n]);
+  const total = cum[n];
+  if (total<1) return points;
+  const numSamples = Math.max(12, Math.floor(total/spacing));
+  const out = [];
+  let i=0;
+  for (let s=0;s<numSamples;s++){
+    const target = (s*total)/numSamples;
+    while (i<n-1 && cum[i+1]<target) i++;
+    const segLen = cum[i+1]-cum[i] || 1e-6;
+    const t = (target-cum[i])/segLen;
+    const p1=points[i], p2=points[(i+1)%n];
+    out.push({x:p1.x+(p2.x-p1.x)*t, y:p1.y+(p2.y-p1.y)*t});
+  }
+  return out;
+}
+function smoothContour(points, radius){
+  const n = points.length;
+  const out = new Array(n);
+  for (let i=0;i<n;i++){
+    let sx=0,sy=0,c=0;
+    for (let k=-radius;k<=radius;k++){
+      const idx=(i+k+n)%n;
+      sx+=points[idx].x; sy+=points[idx].y; c++;
+    }
+    out[i]={x:sx/c, y:sy/c};
+  }
+  return out;
+}
+function convexHull(points){
+  const pts = points.slice().sort((a,b)=> a.x-b.x || a.y-b.y);
+  if (pts.length<3) return pts;
+  const cross=(o,a,b)=>(a.x-o.x)*(b.y-o.y)-(a.y-o.y)*(b.x-o.x);
+  const lower=[];
+  for (const p of pts){
+    while (lower.length>=2 && cross(lower[lower.length-2],lower[lower.length-1],p)<=0) lower.pop();
+    lower.push(p);
+  }
+  const upper=[];
+  for (let k=pts.length-1;k>=0;k--){
+    const p=pts[k];
+    while (upper.length>=2 && cross(upper[upper.length-2],upper[upper.length-1],p)<=0) upper.pop();
+    upper.push(p);
+  }
+  upper.pop(); lower.pop();
+  return lower.concat(upper);
+}
+
 function otsuThreshold(gray){
   const hist = new Array(256).fill(0);
   for (let i=0;i<gray.length;i++) hist[gray[i]]++;
@@ -355,13 +470,21 @@ function classifyShape(contour){
   const area=polygonArea(contour);
   const perimeter=polygonPerimeter(contour);
   const circularity = perimeter>0 ? (4*Math.PI*area)/(perimeter*perimeter) : 0;
+
+  const hull = convexHull(contour);
+  const hullArea = polygonArea(hull) || 1;
+  const solidity = area / hullArea;
+
   const epsilon=Math.max(1.5, 0.02*perimeter);
   const simplified=simplifyClosed(contour,epsilon);
   const v=simplified.length;
 
   let type='poligono', sideLengths=null;
 
-  if (circularity>0.82 && v>=7){
+  if (solidity < 0.75){
+    // forma muy irregular/no convexa: probablemente ruido, sombra o un borrón, no una figura limpia
+    type='irregular';
+  } else if (circularity>0.90 || (circularity>0.80 && v>=6)){
     type='circulo';
   } else if (v===3){
     type='triangulo';
@@ -388,7 +511,7 @@ function classifyShape(contour){
   } else if (v===5){ type='pentagono'; }
   else if (v===6){ type='hexagono'; }
 
-  return { type, sides:v, area, perimeter, circularity, simplified, sideLengths };
+  return { type, sides:v, area, perimeter, circularity, solidity, simplified, sideLengths };
 }
 
 /* ======================= APP ======================= */
@@ -430,6 +553,9 @@ const state = {
   calibPoints: [],
   lastShapes: [],
   lastDetectTime: 0,
+  tracks: [],
+  pendingTracks: [],
+  nextTrackId: 1,
 };
 
 loadPrefs();
@@ -525,29 +651,90 @@ function grayscaleFrom(imgData){
 function runDetection(){
   const w = canvas.width, h = canvas.height;
   const imgData = ctx.getImageData(0,0,w,h);
-  const gray = grayscaleFrom(imgData);
+  let gray = grayscaleFrom(imgData);
+  gray = boxBlur(gray, w, h);
+  gray = boxBlur(gray, w, h); // segunda pasada ~ aproxima un desenfoque gaussiano suave
   const threshold = otsuThreshold(gray);
 
-  const binary = new Uint8Array(w*h);
+  let binary = new Uint8Array(w*h);
   for (let i=0;i<gray.length;i++){
     const isDark = gray[i] < threshold;
     binary[i] = (state.invert ? !isDark : isDark) ? 1 : 0;
   }
+  binary = morphClean(binary, w, h); // quita ruido suelto y rellena huecos pequeños
 
   const total = w*h;
-  const minArea = total * (0.0004 + (state.sensitivity/100)*0.02);
+  const minArea = total * (0.0006 + (state.sensitivity/100)*0.02);
   const maxArea = total * 0.75;
 
   const comps = labelComponents(binary, w, h, minArea, maxArea);
-  const shapes = [];
-  for (const c of comps.slice(0,12)){
-    const contour = traceContour(binary, w, h, c.seed);
-    if (contour.length < 8) continue;
-    const result = classifyShape(contour);
-    shapes.push({ contour, result, bbox:c.bbox });
+  const candidates = [];
+  for (const c of comps.slice(0,14)){
+    const raw = traceContour(binary, w, h, c.seed);
+    if (raw.length < 8) continue;
+    const resampled = resampleContour(raw, 3);
+    const smooth = smoothContour(resampled, 2);
+    const result = classifyShape(smooth);
+    if (result.type === 'irregular') continue; // probable ruido/sombra, se descarta
+    candidates.push({ contour: smooth, result, bbox:c.bbox });
   }
-  state.lastShapes = shapes;
-  renderShapeList(shapes);
+  updateTracks(candidates);
+}
+
+/* ---------- Agente de seguimiento: exige estabilidad entre cuadros antes de confirmar ---------- */
+function updateTracks(candidates){
+  const maxDist = Math.max(canvas.width, canvas.height) * 0.08;
+  const matched = new Set();
+
+  candidates.forEach(cand=>{
+    const ccx = (cand.bbox[0]+cand.bbox[2])/2, ccy = (cand.bbox[1]+cand.bbox[3])/2;
+    let best=null, bestD=Infinity;
+    state.tracks.forEach(t=>{
+      if (matched.has(t.id)) return;
+      const d = Math.hypot(t.cx-ccx, t.cy-ccy);
+      if (d < bestD && d < maxDist){ bestD=d; best=t; }
+    });
+    if (best){
+      matched.add(best.id);
+      const a = 0.4;
+      best.cx = best.cx*(1-a) + ccx*a;
+      best.cy = best.cy*(1-a) + ccy*a;
+      best.age = Math.min(best.age+1, 30);
+      best.missed = 0;
+      best.typeHistory.push(cand.result.type);
+      if (best.typeHistory.length>6) best.typeHistory.shift();
+      best.lastResult = cand.result;
+      best.lastContour = cand.contour;
+      best.lastBbox = cand.bbox;
+    } else {
+      state.tracks.push({
+        id: state.nextTrackId++, cx:ccx, cy:ccy, age:1, missed:0,
+        typeHistory:[cand.result.type],
+        lastResult:cand.result, lastContour:cand.contour, lastBbox:cand.bbox
+      });
+    }
+  });
+
+  state.tracks.forEach(t=>{ if (!matched.has(t.id)) t.missed++; });
+  state.tracks = state.tracks.filter(t=> t.missed<=3);
+
+  const CONFIRM_AGE = 3;
+  const confirmed = state.tracks.filter(t=>t.age>=CONFIRM_AGE).map(t=>{
+    const type = modeType(t.typeHistory);
+    return { contour:t.lastContour, bbox:t.lastBbox, result:{...t.lastResult, type} };
+  });
+  const candidatesOnly = state.tracks.filter(t=>t.age<CONFIRM_AGE);
+
+  state.lastShapes = confirmed;
+  state.pendingTracks = candidatesOnly;
+  renderShapeList(confirmed);
+}
+function modeType(history){
+  const counts={};
+  history.forEach(t=>{ counts[t]=(counts[t]||0)+1; });
+  let best=history[history.length-1], bestC=0;
+  Object.keys(counts).forEach(k=>{ if (counts[k]>bestC){ bestC=counts[k]; best=k; } });
+  return best;
 }
 
 /* ---------- Conversión de unidades ---------- */
@@ -571,6 +758,22 @@ function fmt(n){
 
 /* ---------- Dibujo ---------- */
 function drawOverlays(){
+  // candidatos aún no confirmados: contorno tenue y punteado, sin etiqueta
+  ctx.setLineDash([5,4]);
+  ctx.strokeStyle = 'rgba(255,255,255,.35)';
+  ctx.lineWidth = 1.5;
+  (state.pendingTracks||[]).forEach(t=>{
+    const c = t.lastContour;
+    if (!c || c.length<3) return;
+    ctx.beginPath();
+    ctx.moveTo(c[0].x, c[0].y);
+    for (let k=1;k<c.length;k++) ctx.lineTo(c[k].x, c[k].y);
+    ctx.closePath();
+    ctx.stroke();
+  });
+  ctx.setLineDash([]);
+
+  // figuras confirmadas por el agente: contorno sólido, color y etiqueta
   state.lastShapes.forEach((s, i) => {
     const color = COLORS[i % COLORS.length];
     ctx.strokeStyle = color;
@@ -578,7 +781,7 @@ function drawOverlays(){
     ctx.beginPath();
     const c = s.contour;
     ctx.moveTo(c[0].x, c[0].y);
-    for (let k=1;k<c.length;k+=2) ctx.lineTo(c[k].x, c[k].y);
+    for (let k=1;k<c.length;k++) ctx.lineTo(c[k].x, c[k].y);
     ctx.closePath();
     ctx.stroke();
 
@@ -613,7 +816,10 @@ function drawCalibrationMarks(){
 /* ---------- Panel de resultados ---------- */
 function renderShapeList(shapes){
   if (shapes.length === 0){
-    shapeList.innerHTML = '<div class="empty-state">No se detecta ninguna figura clara. Acerca el objeto, mejora la luz o ajusta la sensibilidad.</div>';
+    const analyzing = (state.pendingTracks||[]).length > 0;
+    shapeList.innerHTML = analyzing
+      ? '<div class="empty-state">🔍 Analizando '+state.pendingTracks.length+' candidato(s)… confirmando que sea una figura estable.</div>'
+      : '<div class="empty-state">No se detecta ninguna figura clara. Acerca el objeto, mejora la luz o ajusta la sensibilidad.</div>';
     return;
   }
   shapeList.innerHTML = shapes.map((s,i)=>{
