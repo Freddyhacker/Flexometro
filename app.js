@@ -15,28 +15,31 @@ const SHAPE_LABELS = {
 // Medidas reales a partir de una figura detectada (en píxeles) + escala
 // ------------------------------------------------------------------
 function computeMeasurements(shape, pxPerCm) {
-  const w = shape.maxX - shape.minX + 1;
-  const h = shape.maxY - shape.minY + 1;
   const areaCm2 = shape.areaPx / (pxPerCm * pxPerCm);
   const perimetroCm = shape.perimeterPx / pxPerCm;
 
   const m = { shapeType: shape.shapeType, area_cm2: areaCm2, perimetro_cm: perimetroCm };
 
   if (shape.shapeType === 'circulo') {
-    const radioPx = Math.sqrt(shape.areaPx / Math.PI);
-    const radioCm = radioPx / pxPerCm;
+    // El rectángulo de área mínima de un círculo es (casi) un cuadrado
+    // cuyo lado es el diámetro — más robusto ante trazos imperfectos
+    // que asumir área = πr².
+    const diametroPx = (shape.rectW + shape.rectH) / 2;
+    const radioCm = (diametroPx / 2) / pxPerCm;
     m.radio_cm = radioCm;
     m.diametro_cm = radioCm * 2;
     m.circunferencia_cm = 2 * Math.PI * radioCm;
   } else if (shape.shapeType === 'cuadrado' || shape.shapeType === 'rectangulo') {
-    const wCm = Math.max(w, h) / pxPerCm;
-    const hCm = Math.min(w, h) / pxPerCm;
+    // rectW/rectH vienen del rectángulo de área mínima: correctos aunque
+    // la figura esté rotada en la foto.
+    const wCm = shape.rectW / pxPerCm;
+    const hCm = shape.rectH / pxPerCm;
     m.largo_cm = wCm;
     m.ancho_cm = hCm;
     m.diagonal_cm = Math.sqrt(wCm * wCm + hCm * hCm);
   } else {
-    m.ancho_aprox_cm = w / pxPerCm;
-    m.alto_aprox_cm = h / pxPerCm;
+    m.ancho_aprox_cm = shape.rectW / pxPerCm;
+    m.alto_aprox_cm = shape.rectH / pxPerCm;
   }
   return m;
 }
@@ -64,6 +67,37 @@ function mainLabel(m, unit) {
   if (m.shapeType === 'cuadrado' || m.shapeType === 'rectangulo')
     return `${SHAPE_LABELS[m.shapeType]} ${(m.largo_cm * f).toFixed(1)}x${(m.ancho_cm * f).toFixed(1)}${unit}`;
   return `${SHAPE_LABELS[m.shapeType] || m.shapeType} P:${(m.perimetro_cm * f).toFixed(1)}${unit}`;
+}
+
+// Dibuja el contorno REAL de la figura detectada: el rectángulo de área
+// mínima (con su rotación) para cuadrado/rectángulo, o la cápsula convexa
+// para círculo/triángulo/polígono. Esto muestra la forma tal cual fue
+// reconocida, no una caja genérica alineada a los ejes.
+function drawShapeOutline(ctx, s) {
+  const useRect = (s.shapeType === 'cuadrado' || s.shapeType === 'rectangulo');
+  const pts = useRect ? s.corners : s.hull;
+  if (!pts || pts.length < 3) return;
+  ctx.beginPath();
+  ctx.moveTo(pts[0].x, pts[0].y);
+  for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+  ctx.closePath();
+  ctx.stroke();
+}
+
+// Remapea TODAS las coordenadas de una figura (incluye corners/hull, no
+// solo el bbox) tras recortar por área seleccionada y/o reescalar
+// (downscale de procesamiento en video). scale multiplica, luego se suma
+// el desplazamiento (offsetX, offsetY).
+function remapShape(s, scale, offsetX, offsetY) {
+  const tx = (x) => x * scale + offsetX;
+  const ty = (y) => y * scale + offsetY;
+  return {
+    ...s,
+    minX: tx(s.minX), maxX: tx(s.maxX), minY: ty(s.minY), maxY: ty(s.maxY),
+    cx: tx(s.cx), cy: ty(s.cy),
+    corners: s.corners.map(p => ({ x: tx(p.x), y: ty(p.y) })),
+    hull: s.hull.map(p => ({ x: tx(p.x), y: ty(p.y) })),
+  };
 }
 
 // ------------------------------------------------------------------
@@ -310,20 +344,15 @@ btnDetectPhoto.addEventListener('click', () => {
   const minAreaPx = Math.max(150, region.w * region.h * 0.004);
   let shapes = ShapeDetector.detectShapes(imageData, { targetShape: targetShapeInput.value, minAreaPx });
 
-  // Volvemos a coordenadas completas del canvas
-  shapes = shapes.map(s => ({
-    ...s,
-    minX: s.minX + region.x, maxX: s.maxX + region.x,
-    minY: s.minY + region.y, maxY: s.maxY + region.y,
-  }));
+  // Volvemos a coordenadas completas del canvas (incluye corners/hull)
+  shapes = shapes.map(s => remapShape(s, 1, region.x, region.y));
 
   photoTool.redraw();
   ctx.lineWidth = 3;
   ctx.strokeStyle = '#2f6f5e';
   ctx.font = 'bold 15px monospace';
   shapes.forEach((s, i) => {
-    const w = s.maxX - s.minX, h = s.maxY - s.minY;
-    ctx.strokeRect(s.minX, s.minY, w, h);
+    drawShapeOutline(ctx, s);
     const label = `#${i + 1}`;
     const tw = ctx.measureText(label).width;
     ctx.fillStyle = '#2f6f5e';
@@ -352,6 +381,8 @@ const btnResumeLive = document.getElementById('btnResumeLive');
 const btnClearCalVideo = document.getElementById('btnClearCalVideo');
 const btnClearRoiVideo = document.getElementById('btnClearRoiVideo');
 const videoToolHint = document.getElementById('videoToolHint');
+const stabRow = document.getElementById('stabRow');
+const stabToggle = document.getElementById('stabToggle');
 
 let videoPxPerCm = null;
 let liveInterval = null;
@@ -363,11 +394,126 @@ let lastStableShapes = [];
 const PROC_WIDTH = 320;
 const procCanvas = document.createElement('canvas');
 
+// ------------------------------------------------------------------
+// Estabilización de imagen (estilo "recorte" tipo Gyroflow, pero usando
+// la figura detectada como punto de referencia en vez de datos de
+// giroscopio). Cada cuadro se dibuja con un ligero zoom, y el recorte
+// se desplaza para compensar el temblor respecto a un ancla suavizada.
+// ------------------------------------------------------------------
+const STAB_ZOOM = 1.12;   // cuánto se hace zoom (12%) para tener margen de recorte
+const STAB_ALPHA = 0.15;  // qué tan lento se mueve el ancla "estable" (más lento = más firme)
+
+let stabAnchor = null;    // {x,y} posición suavizada de referencia, en coords de video crudo
+let currentXform = null;  // transform usado para dibujar el cuadro ACTUAL {sx,sy,sw,sh,cw,ch}
+
+function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+function defaultXform() {
+  const vw = video.videoWidth || 1, vh = video.videoHeight || 1;
+  const cw = videoOverlay.width || vw, ch = videoOverlay.height || vh;
+  if (!stabToggle.checked) return { sx: 0, sy: 0, sw: vw, sh: vh, cw, ch };
+  const sw = vw / STAB_ZOOM, sh = vh / STAB_ZOOM;
+  return { sx: (vw - sw) / 2, sy: (vh - sh) / 2, sw, sh, cw, ch };
+}
+
+// A partir de las figuras crudas de ESTE cuadro, calcula el transform a
+// usar en el PRÓXIMO cuadro (desfase de 1 cuadro, imperceptible a ~5fps
+// de detección, pero evita una dependencia circular).
+function computeNextXform(rawShapes) {
+  const vw = video.videoWidth, vh = video.videoHeight;
+  const cw = videoOverlay.width, ch = videoOverlay.height;
+
+  if (!stabToggle.checked) { stabAnchor = null; return { sx: 0, sy: 0, sw: vw, sh: vh, cw, ch }; }
+
+  const sw = vw / STAB_ZOOM, sh = vh / STAB_ZOOM;
+  const baseSx = (vw - sw) / 2, baseSy = (vh - sh) / 2;
+
+  if (!rawShapes.length) {
+    // sin ancla visible este cuadro: mantenemos el último recorte tal cual
+    return currentXform || { sx: baseSx, sy: baseSy, sw, sh, cw, ch };
+  }
+
+  const anchorShape = rawShapes.reduce((a, b) => (b.areaPx > a.areaPx ? b : a));
+  const raw = { x: anchorShape.cx, y: anchorShape.cy };
+  if (!stabAnchor) stabAnchor = { ...raw };
+
+  const shiftX = raw.x - stabAnchor.x;
+  const shiftY = raw.y - stabAnchor.y;
+  stabAnchor.x += (raw.x - stabAnchor.x) * STAB_ALPHA;
+  stabAnchor.y += (raw.y - stabAnchor.y) * STAB_ALPHA;
+
+  return {
+    sx: clamp(baseSx + shiftX, 0, vw - sw),
+    sy: clamp(baseSy + shiftY, 0, vh - sh),
+    sw, sh, cw, ch,
+  };
+}
+
+function renderVideoFrame(xform) {
+  const ctx = videoOverlay.getContext('2d');
+  ctx.clearRect(0, 0, videoOverlay.width, videoOverlay.height);
+  ctx.drawImage(video, xform.sx, xform.sy, xform.sw, xform.sh, 0, 0, xform.cw, xform.ch);
+}
+
+// Conversión entre coordenadas de PANTALLA (lo que el usuario ve/toca en
+// el canvas) y coordenadas de VIDEO CRUDO (necesarias para recortar y
+// detectar). El zoom es constante; solo cambia el desplazamiento (pan).
+function videoToDisplay(x, y, xform) {
+  return { x: (x - xform.sx) * (xform.cw / xform.sw), y: (y - xform.sy) * (xform.ch / xform.sh) };
+}
+function displayToVideo(x, y, xform) {
+  return { x: xform.sx + x * (xform.sw / xform.cw), y: xform.sy + y * (xform.sh / xform.ch) };
+}
+function displayRectToVideoRect(rect, xform) {
+  const p1 = displayToVideo(rect.x, rect.y, xform);
+  const p2 = displayToVideo(rect.x + rect.w, rect.y + rect.h, xform);
+  return { x: Math.min(p1.x, p2.x), y: Math.min(p1.y, p2.y), w: Math.abs(p2.x - p1.x), h: Math.abs(p2.y - p1.y) };
+}
+
 // Dibuja las cajas + etiquetas de las figuras estabilizadas sobre el
 // overlay. Se usa tanto en cada tick de detección como al redibujar por
 // interacción (arrastre de área), para que nunca queden "rastros".
+function cornersFromCenter(cx, cy, w, h, angle) {
+  const hw = w / 2, hh = h / 2;
+  const local = [{ x: -hw, y: -hh }, { x: hw, y: -hh }, { x: hw, y: hh }, { x: -hw, y: hh }];
+  const cos = Math.cos(angle), sin = Math.sin(angle);
+  return local.map(p => ({ x: cx + p.x * cos - p.y * sin, y: cy + p.x * sin + p.y * cos }));
+}
+
+function drawTrackOutline(ctx, t, xform) {
+  const scaleX = xform.cw / xform.sw, scaleY = xform.ch / xform.sh;
+  const mp = (x, y) => videoToDisplay(x, y, xform);
+
+  if (t.shapeType === 'cuadrado' || t.shapeType === 'rectangulo') {
+    const corners = cornersFromCenter(t.cx, t.cy, t.rectW, t.rectH, t.rectAngle).map(p => mp(p.x, p.y));
+    ctx.beginPath();
+    ctx.moveTo(corners[0].x, corners[0].y);
+    for (let i = 1; i < corners.length; i++) ctx.lineTo(corners[i].x, corners[i].y);
+    ctx.closePath();
+    ctx.stroke();
+  } else if (t.shapeType === 'circulo') {
+    const center = mp(t.cx, t.cy);
+    const radius = (t.rectW + t.rectH) / 4 * ((scaleX + scaleY) / 2);
+    ctx.beginPath();
+    ctx.arc(center.x, center.y, radius, 0, Math.PI * 2);
+    ctx.stroke();
+  } else if (t.hull && t.hull.length >= 3) {
+    const pts = t.hull.map(p => mp(p.x, p.y));
+    ctx.beginPath();
+    ctx.moveTo(pts[0].x, pts[0].y);
+    for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+    ctx.closePath();
+    ctx.stroke();
+  }
+}
+
+// Dibuja el cuadro de video (ya estabilizado según currentXform) y, sobre
+// él, el contorno + etiqueta de cada figura rastreada. Es la única fuente
+// de dibujo del video: por eso se usa como baseDrawFn de la herramienta
+// interactiva (así calibración/área siempre ven el video "en vivo").
 function drawStableShapes(ctx) {
-  ctx.clearRect(0, 0, videoOverlay.width, videoOverlay.height);
+  const xform = currentXform || defaultXform();
+  renderVideoFrame(xform);
 
   if (!videoPxPerCm) {
     ctx.font = 'bold 16px monospace';
@@ -380,15 +526,15 @@ function drawStableShapes(ctx) {
   ctx.strokeStyle = '#2f6f5e';
   ctx.font = 'bold 16px monospace';
   lastStableShapes.forEach((s) => {
-    const x = s.minX, y = s.minY, w = s.maxX - s.minX, h = s.maxY - s.minY;
-    ctx.strokeRect(x, y, w, h);
+    drawTrackOutline(ctx, s, xform);
+    const topLeft = videoToDisplay(s.minX, s.minY, xform);
     const m = computeMeasurements(s, videoPxPerCm);
     const label = mainLabel(m, outUnitInput.value);
     const tw = ctx.measureText(label).width;
     ctx.fillStyle = '#2f6f5e';
-    ctx.fillRect(x, Math.max(0, y - 22), tw + 10, 22);
+    ctx.fillRect(topLeft.x, Math.max(0, topLeft.y - 22), tw + 10, 22);
     ctx.fillStyle = '#ffffff';
-    ctx.fillText(label, x + 5, Math.max(16, y - 6));
+    ctx.fillText(label, topLeft.x + 5, Math.max(16, topLeft.y - 6));
   });
 }
 
@@ -431,7 +577,11 @@ btnStartCam.addEventListener('click', async () => {
     videoViewfinder.hidden = false;
     videoActions.hidden = false;
     videoModeBtns.hidden = false;
+    stabRow.hidden = false;
     btnStartCam.textContent = 'Cambiar cámara';
+
+    stabAnchor = null;
+    currentXform = defaultXform();
 
     videoTool = makeInteractiveCanvas(videoOverlay, drawStableShapes, {
       onCalibrated: (pxPerCm) => {
@@ -446,6 +596,11 @@ btnStartCam.addEventListener('click', async () => {
   } catch (err) {
     alert('No pude activar la cámara: ' + err.message);
   }
+});
+
+stabToggle.addEventListener('change', () => {
+  stabAnchor = null;
+  currentXform = defaultXform();
 });
 
 cameraSelect.addEventListener('change', async () => {
@@ -494,6 +649,10 @@ function updateTracks(rawShapes) {
       t.maxY = t.maxY * (1 - a) + raw.maxY * a;
       t.areaPx = t.areaPx * (1 - a) + raw.areaPx * a;
       t.perimeterPx = t.perimeterPx * (1 - a) + raw.perimeterPx * a;
+      t.rectW = t.rectW * (1 - a) + raw.rectW * a;
+      t.rectH = t.rectH * (1 - a) + raw.rectH * a;
+      t.rectAngle = t.rectAngle * (1 - a) + raw.rectAngle * a;
+      t.hull = raw.hull; // el contorno de círculo/triángulo/polígono usa el último cuadro tal cual
       t.cx = (t.minX + t.maxX) / 2;
       t.cy = (t.minY + t.maxY) / 2;
       t.missed = 0;
@@ -531,17 +690,26 @@ function startLiveLoop() {
   liveInterval = setInterval(() => {
     if (frozen || video.readyState < 2) return;
 
+    const xform = currentXform || defaultXform();
+
     if (!videoPxPerCm) {
-      lastStableShapes = [];
-      videoTool && videoTool.redraw();
+      videoTool && videoTool.redraw(); // dibuja el video + mensaje "sin calibrar"
       renderResults([], null, outUnitInput.value);
+      currentXform = computeNextXform([]);
       return;
     }
 
-    const roi = videoTool ? videoTool.getRoi() : null;
-    const region = roi
-      ? { x: Math.round(roi.x), y: Math.round(roi.y), w: Math.round(roi.w), h: Math.round(roi.h) }
-      : { x: 0, y: 0, w: video.videoWidth, h: video.videoHeight };
+    // El área seleccionada (si existe) está en coordenadas de PANTALLA;
+    // la convertimos a coordenadas de VIDEO CRUDO con el transform de
+    // ESTE cuadro para saber qué región recortar y analizar.
+    const roiDisplay = videoTool ? videoTool.getRoi() : null;
+    const region = roiDisplay
+      ? displayRectToVideoRect(roiDisplay, xform)
+      : { x: xform.sx, y: xform.sy, w: xform.sw, h: xform.sh };
+    region.x = clamp(region.x, 0, video.videoWidth - 10);
+    region.y = clamp(region.y, 0, video.videoHeight - 10);
+    region.w = clamp(region.w, 10, video.videoWidth - region.x);
+    region.h = clamp(region.h, 10, video.videoHeight - region.y);
 
     const procScale = Math.min(PROC_WIDTH / region.w, 1);
     const procW = Math.max(20, Math.round(region.w * procScale));
@@ -559,28 +727,33 @@ function startLiveLoop() {
     });
 
     const inv = 1 / procScale;
-    rawShapes = rawShapes.map(s => ({
-      ...s,
-      minX: s.minX * inv + region.x, maxX: s.maxX * inv + region.x,
-      minY: s.minY * inv + region.y, maxY: s.maxY * inv + region.y,
-      cx: s.cx * inv + region.x, cy: s.cy * inv + region.y,
-    }));
+    rawShapes = rawShapes.map(s => remapShape(s, inv, region.x, region.y)); // vuelven a coords de video crudo
 
     lastStableShapes = updateTracks(rawShapes);
+
+    // videoTool.redraw() usa drawStableShapes como base: renderiza el
+    // video con el xform ACTUAL (currentXform, aún no actualizado) y
+    // dibuja los contornos ya alineados con ese mismo cuadro.
     videoTool && videoTool.redraw();
     renderResults(lastStableShapes, videoPxPerCm, outUnitInput.value);
+
+    // Calculamos el recorte a usar en el PRÓXIMO cuadro, en base a dónde
+    // quedó la figura de referencia en ESTE cuadro.
+    currentXform = computeNextXform(rawShapes);
   }, 220);
 }
 
 btnFreezeCal.addEventListener('click', () => {
   frozen = true;
-  sizeOverlayToVideo();
   const savedRoi = videoTool ? videoTool.getRoi() : null;
 
+  // Congelamos el canvas TAL COMO SE VE (ya estabilizado), no el video
+  // crudo, para que los 2 puntos de calibración coincidan exactamente
+  // con lo que el usuario está mirando en pantalla.
   const frameSnapshot = document.createElement('canvas');
   frameSnapshot.width = videoOverlay.width;
   frameSnapshot.height = videoOverlay.height;
-  frameSnapshot.getContext('2d').drawImage(video, 0, 0, videoOverlay.width, videoOverlay.height);
+  frameSnapshot.getContext('2d').drawImage(videoOverlay, 0, 0);
 
   videoTool = makeInteractiveCanvas(videoOverlay, (ctx) => ctx.drawImage(frameSnapshot, 0, 0), {
     onCalibrated: (pxPerCm) => {
