@@ -157,16 +157,14 @@ const ShapeDetector = (() => {
     return components;
   }
 
-  // Perímetro aproximado: cuenta píxeles del componente que tienen al
-  // menos un vecino (4-conectividad) fuera de la máscara o fuera de imagen.
+  // Perímetro aproximado por conteo de píxeles de borde (rápido; se usa
+  // solo como referencia, la clasificación real usa la cápsula convexa).
   function estimatePerimeter(pixels, mask, width, height) {
     let perimeter = 0;
-    const pixelSet = new Set(pixels);
     for (const idx of pixels) {
       const x = idx % width;
       const y = (idx / width) | 0;
       let isBoundary = false;
-
       if (x === 0 || x === width - 1 || y === 0 || y === height - 1) {
         isBoundary = true;
       } else {
@@ -180,34 +178,198 @@ const ShapeDetector = (() => {
     return perimeter;
   }
 
+  // Extrae los píxeles de borde como puntos {x,y} (para la cápsula convexa).
+  function boundaryPoints(pixels, mask, width, height) {
+    const pts = [];
+    for (const idx of pixels) {
+      const x = idx % width;
+      const y = (idx / width) | 0;
+      let isBoundary = false;
+      if (x === 0 || x === width - 1 || y === 0 || y === height - 1) {
+        isBoundary = true;
+      } else {
+        const neighbors = [idx - 1, idx + 1, idx - width, idx + width];
+        for (const n of neighbors) {
+          if (mask[n] !== 1) { isBoundary = true; break; }
+        }
+      }
+      if (isBoundary) pts.push({ x, y });
+    }
+    return pts;
+  }
+
   // ------------------------------------------------------------------
-  // 3) Clasificación de forma (heurística geométrica, sin polígonos)
+  // 3) Geometría real: cápsula convexa, polígono simplificado y
+  //    rectángulo de área mínima (tolera figuras rotadas/imperfectas)
   // ------------------------------------------------------------------
 
-  function classifyShape(area, perimeter, minX, maxX, minY, maxY) {
-    const w = maxX - minX + 1;
-    const h = maxY - minY + 1;
-    const bboxArea = w * h;
-    const extent = area / bboxArea;               // qué tanto llena su caja
-    const aspect = w / h;
+  // Cápsula convexa (monotone chain / Andrew's algorithm).
+  function convexHull(points) {
+    const pts = points.slice().sort((a, b) => a.x - b.x || a.y - b.y);
+    const n = pts.length;
+    if (n < 3) return pts;
+    const cross = (o, a, b) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
 
-    // 'extent' es mucho más estable que la circularidad basada en conteo
-    // de píxeles de borde (esa se distorsiona con el efecto "escalera").
-    // Valores teóricos de referencia (figura alineada a su bbox):
-    //   cuadrado/rectángulo lleno -> extent ≈ 1.0
-    //   círculo                  -> extent ≈ π/4 ≈ 0.785
-    //   triángulo                -> extent ≈ 0.5
+    const lower = [];
+    for (const p of pts) {
+      while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop();
+      lower.push(p);
+    }
+    const upper = [];
+    for (let i = n - 1; i >= 0; i--) {
+      const p = pts[i];
+      while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop();
+      upper.push(p);
+    }
+    upper.pop(); lower.pop();
+    return lower.concat(upper);
+  }
 
-    if (extent > 0.90) {
-      return (aspect >= 0.9 && aspect <= 1.1) ? 'cuadrado' : 'rectangulo';
+  function polygonPerimeter(poly) {
+    let per = 0;
+    for (let i = 0; i < poly.length; i++) {
+      const a = poly[i], b = poly[(i + 1) % poly.length];
+      per += Math.hypot(b.x - a.x, b.y - a.y);
     }
-    if (extent > 0.64) {
-      return 'circulo';
+    return per;
+  }
+
+  function polygonArea(poly) {
+    let area = 0;
+    for (let i = 0; i < poly.length; i++) {
+      const a = poly[i], b = poly[(i + 1) % poly.length];
+      area += a.x * b.y - b.x * a.y;
     }
-    if (extent > 0.35) {
-      return 'triangulo';
+    return Math.abs(area) / 2;
+  }
+
+  function perpendicularDistance(p, a, b) {
+    const dx = b.x - a.x, dy = b.y - a.y;
+    const len = Math.hypot(dx, dy);
+    if (len === 0) return Math.hypot(p.x - a.x, p.y - a.y);
+    return Math.abs(dy * p.x - dx * p.y + b.x * a.y - b.y * a.x) / len;
+  }
+
+  // Simplificación de Douglas-Peucker: reduce un contorno a sus vértices
+  // "reales", absorbiendo ruido de píxeles y ligeras irregularidades
+  // (equivalente a lo que hace approxPolyDP en OpenCV).
+  function douglasPeucker(points, epsilon) {
+    if (points.length < 3) return points;
+    let dmax = 0, index = 0;
+    const first = points[0], last = points[points.length - 1];
+    for (let i = 1; i < points.length - 1; i++) {
+      const d = perpendicularDistance(points[i], first, last);
+      if (d > dmax) { dmax = d; index = i; }
     }
-    return 'poligono';
+    if (dmax > epsilon) {
+      const left = douglasPeucker(points.slice(0, index + 1), epsilon);
+      const right = douglasPeucker(points.slice(index), epsilon);
+      return left.slice(0, -1).concat(right);
+    }
+    return [first, last];
+  }
+
+  function simplifiedVertexCount(hull) {
+    if (hull.length < 3) return hull.length;
+    const perimeter = polygonPerimeter(hull);
+    const epsilon = Math.max(1.5, perimeter * 0.025);
+    const closed = hull.concat([hull[0]]);
+    const simplified = douglasPeucker(closed, epsilon);
+    return Math.max(1, simplified.length - 1);
+  }
+
+  // Rectángulo de área mínima mediante "rotating calipers": prueba un
+  // rectángulo alineado a cada arista de la cápsula convexa y se queda
+  // con el de menor área. A diferencia de un bounding box alineado a los
+  // ejes, esto SÍ reconoce correctamente un cuadrado/rectángulo rotado.
+  function minAreaRect(hull) {
+    let best = null;
+    for (let i = 0; i < hull.length; i++) {
+      const p1 = hull[i], p2 = hull[(i + 1) % hull.length];
+      const angle = Math.atan2(p2.y - p1.y, p2.x - p1.x);
+      const cos = Math.cos(-angle), sin = Math.sin(-angle);
+      let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+      for (const p of hull) {
+        const rx = p.x * cos - p.y * sin;
+        const ry = p.x * sin + p.y * cos;
+        if (rx < minX) minX = rx; if (rx > maxX) maxX = rx;
+        if (ry < minY) minY = ry; if (ry > maxY) maxY = ry;
+      }
+      const w = maxX - minX, h = maxY - minY;
+      const area = w * h;
+      if (!best || area < best.area) best = { area, w, h, angle, cos, sin, minX, minY };
+    }
+    return best;
+  }
+
+  // Devuelve las 4 esquinas del rectángulo mínimo, en coordenadas de imagen
+  // (útil para dibujar el contorno real, no solo una caja alineada).
+  function rectCorners(rect) {
+    const cosA = Math.cos(rect.angle), sinA = Math.sin(rect.angle);
+    const local = [
+      { x: rect.minX, y: rect.minY },
+      { x: rect.minX + rect.w, y: rect.minY },
+      { x: rect.minX + rect.w, y: rect.minY + rect.h },
+      { x: rect.minX, y: rect.minY + rect.h },
+    ];
+    // deshace la rotación (rotamos con -angle antes; ahora aplicamos +angle)
+    return local.map(p => ({
+      x: p.x * cosA - p.y * sinA,
+      y: p.x * sinA + p.y * cosA,
+    }));
+  }
+
+  // ------------------------------------------------------------------
+  // 4) Clasificación de forma usando geometría real (tolera rotación,
+  //    esquinas redondeadas y trazos imperfectos/manuales).
+  // ------------------------------------------------------------------
+
+  function classifyShape(area, hull) {
+    const hullArea = polygonArea(hull);
+    const solidity = hullArea > 0 ? area / hullArea : 0; // 1.0 = totalmente convexo
+
+    const rect = minAreaRect(hull);
+    const rectArea = Math.max(rect.w * rect.h, 1);
+    const rectExtent = area / rectArea;      // qué tanto llena su rectángulo mínimo
+    const aspect = rect.w / Math.max(rect.h, 0.001);
+    const aspectNorm = aspect >= 1 ? aspect : 1 / aspect;
+
+    const perimeter = polygonPerimeter(hull);
+    // Razón isoperimétrica (4πA/P²): 1.0 para un círculo perfecto, ~0.785
+    // para un cuadrado, ~0.6 para un triángulo equilátero. A diferencia de
+    // comparar radios desde el centroide, esto SÍ distingue un círculo de
+    // un cuadrado (las 4 esquinas de un cuadrado están igual de lejos del
+    // centro que los puntos de un círculo, así que esa métrica no sirve).
+    const circularity = perimeter > 0 ? (4 * Math.PI * area) / (perimeter * perimeter) : 0;
+
+    // La cantidad de vértices tras simplificar (Douglas-Peucker) es la
+    // señal más confiable: un círculo -incluso a mano- conserva muchos
+    // vértices al simplificar porque su contorno curva en todas
+    // direcciones; un polígono con lados rectos colapsa a sus esquinas
+    // reales sin importar rotación ni tamaño.
+    const vertexCount = simplifiedVertexCount(hull);
+
+    // 1) Pocos vértices + buen llenado de su rectángulo mínimo -> polígono
+    //    de lados rectos (cuadrado/rectángulo), tolera esquinas redondeadas
+    //    (que agregan 1-2 vértices extra) y cualquier rotación.
+    if (vertexCount <= 6 && rectExtent > 0.78 && solidity > 0.85) {
+      const type = (aspectNorm <= 1.15) ? 'cuadrado' : 'rectangulo';
+      return { type, rect, solidity, vertexCount };
+    }
+
+    // 2) Triángulo: 3 vértices, o llena ~35-65% de su rectángulo mínimo.
+    if (vertexCount <= 3 || (rectExtent > 0.35 && rectExtent <= 0.65 && solidity > 0.85)) {
+      return { type: 'triangulo', rect, solidity, vertexCount };
+    }
+
+    // 3) Círculo: muchos vértices tras simplificar + razón isoperimétrica
+    //    alta. Tolera trazos a mano (no exige un círculo perfecto).
+    if (vertexCount >= 6 && circularity > 0.80 && solidity > 0.85) {
+      return { type: 'circulo', rect, solidity, vertexCount };
+    }
+
+    // 4) Cualquier otro polígono convexo/irregular.
+    return { type: 'poligono', rect, solidity, vertexCount };
   }
 
   // ------------------------------------------------------------------
@@ -239,14 +401,32 @@ const ShapeDetector = (() => {
     const shapes = [];
     for (const c of components) {
       if (c.area < minAreaPx || c.area > maxAreaPx) continue;
-      const perimeter = estimatePerimeter(c.pixels, mask, width, height);
-      const shapeType = classifyShape(c.area, perimeter, c.minX, c.maxX, c.minY, c.maxY);
+
+      const bPoints = boundaryPoints(c.pixels, mask, width, height);
+      if (bPoints.length < 3) continue;
+      const hull = convexHull(bPoints);
+      if (hull.length < 3) continue;
+
+      const { type: shapeType, rect, solidity, vertexCount } = classifyShape(c.area, hull);
       if (targetShape !== 'auto' && shapeType !== targetShape) continue;
+
+      const perimeterPx = polygonPerimeter(hull); // más preciso que el conteo de píxeles
+      const corners = rectCorners(rect);
+      // El ángulo debe corresponder siempre al lado LARGO (rectW), sin
+      // importar si el algoritmo de rotating calipers probó el lado
+      // corto primero.
+      const longAxisAngle = (rect.w >= rect.h) ? rect.angle : rect.angle + Math.PI / 2;
 
       shapes.push({
         shapeType,
         areaPx: c.area,
-        perimeterPx: perimeter,
+        perimeterPx,
+        rectW: Math.max(rect.w, rect.h),
+        rectH: Math.min(rect.w, rect.h),
+        rectAngle: longAxisAngle,
+        corners,           // 4 esquinas del rectángulo mínimo (para dibujar aunque esté rotado)
+        hull,               // cápsula convexa completa (para dibujar círculos/polígonos con su forma real)
+        solidity, vertexCount,
         minX: c.minX, maxX: c.maxX, minY: c.minY, maxY: c.maxY,
         cx: (c.minX + c.maxX) / 2, cy: (c.minY + c.maxY) / 2,
       });
@@ -256,7 +436,10 @@ const ShapeDetector = (() => {
     return shapes.slice(0, maxShapes);
   }
 
-  return { detectShapes, toGrayscale, boxBlur3, otsuThreshold, binarize, connectedComponents };
+  return {
+    detectShapes, toGrayscale, boxBlur3, otsuThreshold, binarize, connectedComponents,
+    convexHull, minAreaRect, douglasPeucker,
+  };
 })();
 
 if (typeof module !== 'undefined') module.exports = ShapeDetector;
