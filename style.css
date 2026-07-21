@@ -243,6 +243,17 @@ input[type="number"]:focus, select:focus {
   background: transparent;
 }
 
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  color: var(--muted);
+}
+.checkbox-row input { width: 16px; height: 16px; accent-color: var(--accent); }
+
 .actions {
   display: flex;
   flex-wrap: wrap;
@@ -293,7 +304,7 @@ input[type="number"]:focus, select:focus {
   height: auto;
 }
 #videoViewfinder { position: relative; }
-#video { position: relative; z-index: 1; }
+#video { position: relative; z-index: 1; visibility: hidden; } /* fuente de píxeles; el canvas la dibuja */
 #videoOverlay {
   position: absolute;
   top: 0; left: 0;
