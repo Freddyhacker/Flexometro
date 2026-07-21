@@ -95,18 +95,59 @@ necesitan drivers), el navegador la ve igual que la cámara integrada.
 La app no necesita configuración especial para esto — el selector de
 cámara ya cubre el caso automáticamente.
 
-## Precisión — cosas a tener en cuenta
+## Estabilización de imagen (tipo "Gyroflow", pero sin giroscopio)
 
-Este motor de detección está escrito desde cero en JavaScript (sin
-OpenCV ni ninguna librería) para que la app no dependa de nada externo.
-Es sólido para figuras sólidas de un solo color sobre fondo parejo, pero
-tiene límites:
-- Clasifica la forma según cuánto llena su caja envolvente (extent), no
-  por conteo de vértices — funciona muy bien para círculo/cuadrado/
-  rectángulo; el triángulo y polígonos son una aproximación.
-- Para triángulos y polígonos no calcula lados individuales (sí área y
-  perímetro aproximado), a diferencia de círculo/cuadrado/rectángulo.
-- Mejor contraste y luz pareja = mejores resultados.
+Antes solo se suavizaban las *medidas* (el número), pero la imagen del
+video seguía temblando. Ahora también se estabiliza la **imagen misma**:
+
+- La app graba el video con un ~12% de zoom de más, dejando margen para
+  recortar y desplazar el encuadre cuadro a cuadro.
+- En vez de datos de giroscopio (como usa Gyroflow), usa la figura
+  detectada como punto de referencia: compara dónde "debería" estar
+  (según una tendencia suavizada) contra dónde apareció realmente en
+  este cuadro, y desplaza el recorte para compensar esa diferencia.
+- El resultado: el temblor de la mano se nota mucho menos tanto en la
+  imagen como en las medidas, sin depender de sensores del teléfono.
+- Se puede desactivar con el interruptor **"🩹 Estabilizar imagen"** si
+  prefieres ver el encuadre completo sin recorte.
+- Si no hay ninguna figura visible en el cuadro (por ejemplo, mientras
+  reencuadras), no hay referencia para estabilizar ese instante — se
+  mantiene el último recorte conocido hasta volver a detectar algo.
+
+## Motor de detección — geometría real, no comparación con formas perfectas
+
+La versión anterior clasificaba comparando la figura contra un cuadrado o
+círculo "ideal", por eso fallaba con esquinas redondeadas, figuras
+rotadas, o trazos a mano. Ahora el motor calcula, para cada figura:
+
+- **Cápsula convexa** (convex hull) del contorno real.
+- **Rectángulo de área mínima** (rotating calipers) — el rectángulo más
+  ajustado que la envuelve, **sea cual sea su rotación**. Esto es clave:
+  antes, un cuadrado fotografiado un poco torcido se media mal porque se
+  comparaba con su caja alineada a los ejes (que para un cuadrado rotado
+  45° es casi el doble de grande). Ahora se mide correctamente aunque la
+  foto no esté perfectamente recta.
+- **Simplificación de contorno** (Douglas-Peucker, igual que usa OpenCV)
+  para contar los vértices "reales" de la figura, absorbiendo el ruido de
+  píxeles y las imperfecciones de un trazo a mano.
+- **Razón isoperimétrica** (4πÁrea/Perímetro²) para confirmar un círculo
+  sin exigir que sea perfecto.
+
+Con esto: un círculo dibujado a mano (probado con hasta 15% de
+irregularidad en el radio) se sigue reconociendo como círculo; un cuadrado
+con esquinas redondeadas o rotado 15-30° se sigue reconociendo como
+cuadrado, con sus medidas correctas.
+
+El contorno que se dibuja sobre la foto/video ahora es la forma real
+detectada (el rectángulo con su rotación, o la cápsula convexa), no una
+caja genérica — así puedes confirmar visualmente que la detección es
+correcta.
+
+## Otras cosas a tener en cuenta
+
+- Sigue siendo más confiable con buen contraste y luz pareja.
+- Triángulos y polígonos no calculan lados individuales (sí área y
+  perímetro), a diferencia de círculo/cuadrado/rectángulo.
 
 ## Estructura del proyecto
 
