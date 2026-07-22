@@ -89,6 +89,7 @@ html, body {
   color: var(--accent);
 }
 #emptyHint p { font-size: 14px; line-height: 1.5; margin: 0; }
+#emptyHint p strong { color: var(--accent); }
 #emptyHint.hidden-hint { display: none; }
 
 /* ===========================================================
@@ -188,8 +189,11 @@ html, body {
    =========================================================== */
 .mode-switch { display: flex; gap: 4px; }
 .mode-btn {
-  font-size: 18px;
-  width: 40px; height: 40px;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  white-space: nowrap;
+  padding: 0 10px;
+  height: 40px;
   border-radius: 8px;
   border: 1.5px solid var(--line);
   background: transparent;
