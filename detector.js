@@ -199,6 +199,119 @@ const ShapeDetector = (() => {
   }
 
   // ------------------------------------------------------------------
+  // 1b) Detección automática de cuadrícula de calibración
+  // ------------------------------------------------------------------
+
+  function sobelMagnitude(gray, width, height) {
+    const out = new Float32Array(width * height);
+    const gx = [-1, 0, 1, -2, 0, 2, -1, 0, 1];
+    const gy = [-1, -2, -1, 0, 0, 0, 1, 2, 1];
+    for (let y = 1; y < height - 1; y++) {
+      for (let x = 1; x < width - 1; x++) {
+        let sx = 0, sy = 0, k = 0;
+        for (let dy = -1; dy <= 1; dy++) {
+          for (let dx = -1; dx <= 1; dx++) {
+            const v = gray[(y + dy) * width + (x + dx)];
+            sx += v * gx[k]; sy += v * gy[k]; k++;
+          }
+        }
+        out[y * width + x] = Math.sqrt(sx * sx + sy * sy);
+      }
+    }
+    return out;
+  }
+
+  function normalizeToByte(arr) {
+    let max = 1;
+    for (let i = 0; i < arr.length; i++) if (arr[i] > max) max = arr[i];
+    const out = new Uint8ClampedArray(arr.length);
+    for (let i = 0; i < arr.length; i++) out[i] = (arr[i] / max) * 255;
+    return out;
+  }
+
+  /**
+   * Busca una cuadrícula (líneas formando cuadros) en la imagen y estima
+   * cuántos píxeles equivalen a 1 cm, a partir del tamaño real de cada
+   * cuadro (cmPerSquare). Detecta los BORDES (líneas de la cuadrícula) y
+   * trata cada celda interior como su propia región, igual que "agujeros"
+   * delimitados por esas líneas.
+   *
+   * Devuelve { pxPerCm, count } o null si no encuentra suficientes
+   * cuadros de tamaño consistente como para confiar en la medida.
+   */
+  function detectGridPxPerCm(imageData, cmPerSquare) {
+    const { width, height } = imageData;
+    const gray = toGrayscale(imageData);
+
+    // OJO: aquí NO aplicamos el blur de 3x3 que sí usamos para detectar
+    // figuras — ese blur ensancha demasiado una línea de cuadrícula fina
+    // (de 1-2 px) y termina "comiéndose" varios píxeles de cada celda,
+    // subestimando el tamaño real de la cuadrícula.
+    const mag = sobelMagnitude(gray, width, height);
+    const bytes = normalizeToByte(mag);
+    const t = otsuThreshold(bytes);
+
+    const edgeMask = new Uint8Array(bytes.length);
+    for (let i = 0; i < bytes.length; i++) edgeMask[i] = bytes[i] > t ? 1 : 0;
+
+    // Medimos el grosor típico de una línea ya detectada (en píxeles),
+    // recorriendo VARIAS filas (no solo una: si una fila cae justo sobre
+    // una línea horizontal de la cuadrícula, medir solo ahí daría un
+    // resultado absurdo) y usando la MEDIANA de todas las rachas cortas
+    // encontradas. Ese grosor es lo que le "robamos" a cada celda al
+    // separarlas, así que se lo devolvemos a la medida final.
+    const sampleRows = [0.2, 0.35, 0.5, 0.65, 0.8].map(f => Math.floor(height * f));
+    const allRuns = [];
+    for (const y of sampleRows) {
+      let run = 0;
+      for (let x = 0; x < width; x++) {
+        if (edgeMask[y * width + x] === 1) {
+          run++;
+        } else if (run > 0) {
+          if (run < width * 0.1) allRuns.push(run); // descarta rachas gigantes (fila degenerada)
+          run = 0;
+        }
+      }
+    }
+    allRuns.sort((a, b) => a - b);
+    const avgLineThickness = allRuns.length ? allRuns[Math.floor(allRuns.length / 2)] : 1;
+
+    // Invertimos: el primer plano ahora son las celdas INTERIORES de la
+    // cuadrícula (regiones separadas por las líneas de borde).
+    const cellMask = new Uint8Array(edgeMask.length);
+    for (let i = 0; i < edgeMask.length; i++) cellMask[i] = edgeMask[i] === 1 ? 0 : 1;
+
+    const components = connectedComponents(cellMask, width, height);
+    const imgArea = width * height;
+    const minArea = imgArea * 0.0002;
+    const maxArea = imgArea * 0.2; // permite pocos cuadros grandes (cámara cerca)
+
+    const sides = [];
+    for (const c of components) {
+      if (c.area < minArea || c.area > maxArea) continue;
+      const w = c.maxX - c.minX + 1, h = c.maxY - c.minY + 1;
+      if (w <= 1 || h <= 1) continue;
+      const aspect = w / h;
+      if (aspect < 0.7 || aspect > 1.3) continue;
+      if (c.area / (w * h) < 0.6) continue; // debe llenar bien su caja
+      sides.push((w + h) / 2);
+    }
+
+    if (sides.length < 4) return null;
+
+    sides.sort((a, b) => a - b);
+    const median = sides[Math.floor(sides.length / 2)];
+    const filtered = sides.filter(s => s > median * 0.6 && s < median * 1.4);
+    if (filtered.length < 4) return null;
+
+    const measuredSide = filtered.reduce((a, b) => a + b, 0) / filtered.length;
+    // Cada celda perdió aprox. el grosor de UNA línea de borde (la que la
+    // separa de la siguiente celda); se lo devolvemos.
+    const sidePx = measuredSide + avgLineThickness;
+    return { pxPerCm: sidePx / cmPerSquare, count: filtered.length };
+  }
+
+  // ------------------------------------------------------------------
   // 3) Geometría real: cápsula convexa, polígono simplificado y
   //    rectángulo de área mínima (tolera figuras rotadas/imperfectas)
   // ------------------------------------------------------------------
@@ -437,7 +550,7 @@ const ShapeDetector = (() => {
   }
 
   return {
-    detectShapes, toGrayscale, boxBlur3, otsuThreshold, binarize, connectedComponents,
+    detectShapes, detectGridPxPerCm, toGrayscale, boxBlur3, otsuThreshold, binarize, connectedComponents,
     convexHull, minAreaRect, douglasPeucker,
   };
 })();
