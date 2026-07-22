@@ -9,9 +9,11 @@
 <body>
 
   <div id="stage">
-    <video id="video" playsinline autoplay muted hidden></video>
-    <canvas id="photoCanvas" hidden></canvas>
-    <canvas id="overlay"></canvas>
+    <div id="mediaWrap">
+      <video id="video" playsinline autoplay muted hidden></video>
+      <canvas id="photoCanvas" hidden></canvas>
+      <canvas id="overlay"></canvas>
+    </div>
 
     <div id="emptyHint">
       <div class="brand-mark">＋</div>
@@ -110,6 +112,13 @@
     <div class="panel-section">
       <label class="panel-label" for="cameraSelect">Cámara</label>
       <select id="cameraSelect"></select>
+    </div>
+
+    <div class="panel-section">
+      <label class="checkbox-row">
+        <input type="checkbox" id="stabToggle" checked />
+        <span>🩹 Estabilizar imagen en video (reduce el temblor de la mano)</span>
+      </label>
     </div>
 
     <div class="panel-section">
