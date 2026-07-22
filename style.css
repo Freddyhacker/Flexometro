@@ -184,6 +184,25 @@ html, body {
   text-align: center;
 }
 
+.fab-camera {
+  position: fixed;
+  top: calc(114px + var(--safe-top));
+  right: 14px;
+  z-index: 11;
+  width: 50px; height: 50px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  font-size: 21px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 3px 12px rgba(0,0,0,0.45);
+  cursor: pointer;
+}
+.fab-camera.active { background: var(--accent-2); }
+
 /* ===========================================================
    Barra inferior — modo, acción principal, resultados
    =========================================================== */
