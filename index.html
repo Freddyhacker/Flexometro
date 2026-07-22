@@ -1,359 +1,135 @@
-/* ===========================================================
-   Tokens
-   =========================================================== */
-:root {
-  --ink: #16241f;
-  --muted: #9fb3ac;
-  --accent: #e8622c;
-  --accent-2: #2f6f5e;
-  --surface: #ffffff;
-  --hud-bg: rgba(13, 22, 19, 0.82);
-  --line: rgba(255,255,255,0.14);
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+<title>Medidor · figuras en vivo</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
 
-  --mono: ui-monospace, "SFMono-Regular", "SF Mono", Menlo, Consolas, "Roboto Mono", monospace;
-  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  <div id="stage">
+    <div id="mediaWrap">
+      <video id="video" playsinline autoplay muted hidden></video>
+      <canvas id="photoCanvas" hidden></canvas>
+      <canvas id="overlay"></canvas>
+    </div>
 
-  --safe-top: env(safe-area-inset-top, 0px);
-  --safe-bottom: env(safe-area-inset-bottom, 0px);
-}
+    <div id="emptyHint">
+      <div class="brand-mark">＋</div>
+      <p>Toca <strong>"🎥 Video"</strong> abajo para activar la cámara,<br />o "Elegir foto" para subir una imagen</p>
+    </div>
+  </div>
 
-* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  <!-- Barra superior -->
+  <header class="hud hud-top">
+    <button class="hud-icon" id="btnSettings" aria-label="Ajustes">⚙️</button>
+    <div class="cal-badge" id="calBadge">Sin calibrar</div>
+    <button class="hud-icon hud-unit" id="btnCycleUnit">cm</button>
+  </header>
 
-html, body {
-  margin: 0; padding: 0;
-  width: 100%; height: 100%;
-  background: #000;
-  color: #eaf2ef;
-  font-family: var(--sans);
-  overflow: hidden;
-  position: fixed;
-  inset: 0;
-}
+  <!-- Herramientas (calibrar manual / área) -->
+  <div class="tools" id="toolsBar" hidden>
+    <button class="tool-btn" data-tool="none" id="toolNone">👁 Ver</button>
+    <button class="tool-btn" data-tool="calibrate" id="toolCalibrate">📏 Calibrar</button>
+    <button class="tool-btn" data-tool="roi" id="toolRoi">▭ Área</button>
+    <button class="tool-btn tool-ghost" id="btnClearRoi">Borrar área</button>
+  </div>
+  <p class="tool-hint" id="toolHint" hidden></p>
 
-/* ===========================================================
-   Escenario (foto / video) — pantalla completa
-   =========================================================== */
-#stage {
-  position: fixed;
-  inset: 0;
-  background: #0d1613;
-  overflow: hidden;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-#mediaWrap {
-  position: relative;
-  max-width: 100%;
-  max-height: 100%;
-  line-height: 0;
-}
-#video, #photoCanvas {
-  display: block;
-  max-width: 100vw;
-  max-height: 100vh;
-  width: auto;
-  height: auto;
-  transform-origin: center center;
-  will-change: transform;
-}
-#overlay {
-  position: absolute;
-  top: 0; left: 0;
-  width: 100%; height: 100%;
-  pointer-events: auto;
-  touch-action: none;
-  z-index: 3;
-  transform-origin: center center;
-  will-change: transform;
-}
-#video { z-index: 1; }
-#photoCanvas { z-index: 1; cursor: crosshair; }
+  <!-- Barra inferior -->
+  <footer class="hud hud-bottom">
+    <div class="mode-switch">
+      <button class="mode-btn active" data-mode="foto">📷 Foto</button>
+      <button class="mode-btn" data-mode="video">🎥 Video</button>
+    </div>
 
-#emptyHint {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 10px;
-  color: var(--muted);
-  text-align: center;
-  padding: 0 40px;
-  z-index: 2;
-}
-#emptyHint .brand-mark {
-  font-family: var(--mono);
-  font-size: 40px;
-  color: var(--accent);
-}
-#emptyHint p { font-size: 14px; line-height: 1.5; margin: 0; }
-#emptyHint.hidden-hint { display: none; }
+    <label for="fileInput" class="hud-primary" id="btnPickPhoto">Elegir foto</label>
+    <input type="file" id="fileInput" accept="image/*" capture="environment" hidden />
 
-/* ===========================================================
-   HUD (barras flotantes translúcidas)
-   =========================================================== */
-.hud {
-  position: fixed;
-  left: 0; right: 0;
-  z-index: 10;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  background: var(--hud-bg);
-  backdrop-filter: blur(6px);
-  padding: 10px 14px;
-}
-.hud-top {
-  top: 0;
-  padding-top: calc(10px + var(--safe-top));
-  border-bottom: 1px solid var(--line);
-}
-.hud-bottom {
-  bottom: 0;
-  padding-bottom: calc(10px + var(--safe-bottom));
-  border-top: 1px solid var(--line);
-  justify-content: space-between;
-}
+    <button class="hud-primary" id="btnStartCam" hidden>Activar cámara</button>
+    <button class="hud-primary hud-primary-accent" id="btnDetectPhoto" hidden>Detectar</button>
 
-.hud-icon {
-  font-family: var(--mono);
-  background: transparent;
-  border: 1.5px solid var(--line);
-  color: #eaf2ef;
-  border-radius: 8px;
-  width: 40px; height: 40px;
-  font-size: 15px;
-  display: flex; align-items: center; justify-content: center;
-  cursor: pointer;
-}
-.hud-unit { font-weight: 700; letter-spacing: 0.03em; }
+    <button class="hud-icon" id="btnResultsToggle">
+      <span id="resultsCount">0</span>
+    </button>
+  </footer>
 
-.cal-badge {
-  flex: 1;
-  font-family: var(--mono);
-  font-size: 12.5px;
-  color: var(--accent);
-  text-align: center;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.cal-badge.ok { color: var(--accent-2); }
+  <!-- Panel de resultados deslizable -->
+  <div class="sheet collapsed" id="resultsSheet">
+    <div class="sheet-handle" id="sheetHandle"></div>
+    <div id="resultsSummary" class="sheet-summary">Sin figuras detectadas</div>
+    <div id="resultsList" class="results-list"></div>
+  </div>
 
-/* ===========================================================
-   Herramientas (calibrar manual / área)
-   =========================================================== */
-.tools {
-  position: fixed;
-  left: 0; right: 0;
-  top: calc(60px + var(--safe-top));
-  z-index: 9;
-  display: flex;
-  gap: 6px;
-  padding: 8px 12px;
-  overflow-x: auto;
-}
-.tool-btn {
-  font-family: var(--mono);
-  font-size: 12px;
-  padding: 7px 12px;
-  border-radius: 20px;
-  border: 1.5px solid var(--line);
-  background: var(--hud-bg);
-  color: #eaf2ef;
-  white-space: nowrap;
-  cursor: pointer;
-}
-.tool-btn.active { background: var(--accent); border-color: var(--accent); color: #fff; }
-.tool-ghost { margin-left: auto; opacity: 0.75; }
+  <!-- Panel de ajustes -->
+  <div class="panel-backdrop" id="settingsBackdrop" hidden></div>
+  <div class="panel" id="settingsPanel" hidden>
+    <div class="panel-head">
+      <h2>Ajustes</h2>
+      <button class="hud-icon" id="btnCloseSettings">✕</button>
+    </div>
 
-.tool-hint {
-  position: fixed;
-  left: 12px; right: 12px;
-  top: calc(108px + var(--safe-top));
-  z-index: 9;
-  font-family: var(--mono);
-  font-size: 11.5px;
-  color: var(--muted);
-  background: var(--hud-bg);
-  border-radius: 8px;
-  padding: 6px 10px;
-  text-align: center;
-}
+    <div class="panel-section">
+      <label class="panel-label">Tamaño real de cada cuadro de tu cuadrícula</label>
+      <div class="field-row">
+        <input type="number" id="calValue" value="1" min="0.1" step="0.1" inputmode="decimal" />
+        <select id="calUnit">
+          <option value="mm">mm</option>
+          <option value="cm" selected>cm</option>
+          <option value="m">m</option>
+          <option value="in">in</option>
+        </select>
+      </div>
+      <p class="panel-hint">
+        Pon una cuadrícula/papel cuadriculado frente a la cámara: la app
+        detecta el tamaño de los cuadros sola y recalcula la escala todo
+        el tiempo (si te acercas o alejas, se ajusta automáticamente).
+      </p>
+    </div>
 
-/* ===========================================================
-   Barra inferior — modo, acción principal, resultados
-   =========================================================== */
-.mode-switch { display: flex; gap: 4px; }
-.mode-btn {
-  font-size: 18px;
-  width: 40px; height: 40px;
-  border-radius: 8px;
-  border: 1.5px solid var(--line);
-  background: transparent;
-  color: var(--muted);
-  cursor: pointer;
-}
-.mode-btn.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+    <div class="panel-section">
+      <label class="panel-label">Unidad de los resultados</label>
+      <select id="outUnit">
+        <option value="mm">mm</option>
+        <option value="cm" selected>cm</option>
+        <option value="m">m</option>
+        <option value="in">in</option>
+      </select>
+    </div>
 
-.hud-primary {
-  flex: 1;
-  font-family: var(--mono);
-  font-size: 14px;
-  text-align: center;
-  padding: 11px 14px;
-  border-radius: 8px;
-  border: none;
-  background: var(--ink);
-  color: #eaf2ef;
-  cursor: pointer;
-  display: block;
-}
-.hud-primary-accent { background: var(--accent); }
+    <div class="panel-section">
+      <label class="panel-label">Figura a buscar</label>
+      <select id="targetShape">
+        <option value="auto">🔍 Automático</option>
+        <option value="circulo">⚪ Círculo</option>
+        <option value="cuadrado">🟥 Cuadrado</option>
+        <option value="rectangulo">▭ Rectángulo</option>
+        <option value="triangulo">🔺 Triángulo</option>
+      </select>
+    </div>
 
-#btnResultsToggle { position: relative; }
-#resultsCount {
-  position: absolute;
-  top: -4px; right: -4px;
-  background: var(--accent);
-  color: #fff;
-  font-size: 10px;
-  font-family: var(--mono);
-  border-radius: 999px;
-  min-width: 16px; height: 16px;
-  display: flex; align-items: center; justify-content: center;
-  padding: 0 3px;
-}
+    <div class="panel-section">
+      <label class="panel-label" for="cameraSelect">Cámara</label>
+      <select id="cameraSelect"></select>
+    </div>
 
-/* ===========================================================
-   Panel deslizable de resultados
-   =========================================================== */
-.sheet {
-  position: fixed;
-  left: 0; right: 0; bottom: 0;
-  z-index: 15;
-  background: var(--surface);
-  color: var(--ink);
-  border-radius: 16px 16px 0 0;
-  box-shadow: 0 -4px 24px rgba(0,0,0,0.35);
-  transition: transform 0.25s ease;
-  max-height: 70vh;
-  display: flex;
-  flex-direction: column;
-  padding-bottom: calc(70px + var(--safe-bottom));
-}
-.sheet.collapsed { transform: translateY(calc(100% - 78px - var(--safe-bottom))); }
-.sheet-handle {
-  width: 40px; height: 4px;
-  background: var(--line);
-  background: #d7ddda;
-  border-radius: 4px;
-  margin: 10px auto 4px;
-  cursor: pointer;
-}
-.sheet-summary {
-  font-family: var(--mono);
-  font-size: 13px;
-  text-align: center;
-  padding: 6px 16px 10px;
-  color: var(--muted);
-  cursor: pointer;
-}
-.results-list {
-  overflow-y: auto;
-  padding: 0 14px 14px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-.result-item { border: 1px solid #d7ddda; border-radius: 8px; overflow: hidden; }
-.result-head {
-  background: var(--ink);
-  color: #eaf2ef;
-  font-family: var(--mono);
-  font-size: 13px;
-  padding: 8px 12px;
-}
-.result-head .idx { color: var(--accent); }
-.result-body {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 1px;
-  background: #d7ddda;
-}
-.result-metric { background: var(--surface); padding: 10px 12px; }
-.result-metric .k {
-  font-size: 11px;
-  color: #5b6e68;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  font-family: var(--mono);
-}
-.result-metric .v {
-  font-family: var(--mono);
-  font-size: 19px;
-  color: var(--accent-2);
-  font-weight: 600;
-  margin-top: 2px;
-}
+    <div class="panel-section">
+      <label class="checkbox-row">
+        <input type="checkbox" id="stabToggle" checked />
+        <span>🩹 Estabilizar imagen en video (reduce el temblor de la mano)</span>
+      </label>
+    </div>
 
-/* ===========================================================
-   Panel de ajustes
-   =========================================================== */
-.panel-backdrop {
-  position: fixed; inset: 0;
-  background: rgba(0,0,0,0.5);
-  z-index: 19;
-}
-.panel {
-  position: fixed;
-  left: 0; right: 0; bottom: 0;
-  z-index: 20;
-  background: var(--surface);
-  color: var(--ink);
-  border-radius: 16px 16px 0 0;
-  padding: 16px 18px calc(24px + var(--safe-bottom));
-  max-height: 85vh;
-  overflow-y: auto;
-}
-.panel-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
-.panel-head h2 { font-size: 17px; margin: 0; }
-.panel-head .hud-icon { border-color: #d7ddda; color: var(--ink); }
-.panel-section { margin-bottom: 18px; }
-.panel-label {
-  display: block;
-  font-family: var(--mono);
-  font-size: 11.5px;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: #5b6e68;
-  margin-bottom: 6px;
-}
-.panel-hint { font-size: 12.5px; color: #5b6e68; line-height: 1.5; margin: 8px 0 0; }
-.field-row { display: flex; gap: 8px; }
-.field-row input[type="number"] { flex: 1; }
+    <div class="panel-section">
+      <label class="checkbox-row">
+        <input type="checkbox" id="manualCalToggle" />
+        <span>Usar calibración manual (2 puntos) en vez de la cuadrícula automática</span>
+      </label>
+    </div>
+  </div>
 
-input[type="number"], select {
-  font-family: var(--mono);
-  font-size: 15px;
-  padding: 9px 10px;
-  border: 1.5px solid #d7ddda;
-  border-radius: 6px;
-  background: #f4f7f6;
-  color: var(--ink);
-  width: 100%;
-}
-.checkbox-row {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  font-size: 13px;
-  color: #33443d;
-}
-.checkbox-row input { width: 18px; height: 18px; accent-color: var(--accent); margin-top: 1px; flex-shrink: 0; }
-
-@media (prefers-reduced-motion: reduce) {
-  * { transition: none !important; animation: none !important; }
-}
+  <script src="detector.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
