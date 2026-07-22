@@ -228,6 +228,7 @@ const outUnitInput = document.getElementById('outUnit');
 const targetShapeInput = document.getElementById('targetShape');
 const cameraSelect = document.getElementById('cameraSelect');
 const manualCalToggle = document.getElementById('manualCalToggle');
+const stabToggle = document.getElementById('stabToggle');
 
 const tool = makeInteractiveCanvas(overlay);
 
@@ -407,6 +408,74 @@ let lastStableShapes = [];
 const PROC_WIDTH = 280;
 const procCanvas = document.createElement('canvas');
 
+// ------------------------------------------------------------------
+// Estabilización LIGERA: en vez de redibujar el video pixel por pixel
+// en un canvas cada cuadro (costoso, causaba trabas), se aplica un
+// pequeño desplazamiento con CSS `transform` directamente al <video> y
+// al overlay — eso lo compone la GPU, prácticamente gratis. El video se
+// graba con un ligero zoom de más (margen) para poder desplazarlo sin
+// que se vean los bordes.
+// ------------------------------------------------------------------
+const STAB_ZOOM = 1.08;
+const STAB_ALPHA = 0.18;
+let stabAnchor = null;   // {x,y} en coords de video crudo, suavizado
+let stabShiftPx = { x: 0, y: 0 }; // último desplazamiento aplicado (coords de video crudo)
+
+function applyStabTransform() {
+  if (!stabToggle.checked) {
+    video.style.transform = '';
+    overlay.style.transform = '';
+    return;
+  }
+  const rect = video.getBoundingClientRect();
+  if (!rect.width || !video.videoWidth) return;
+  const cssScale = rect.width / video.videoWidth;
+  const dxCss = clamp(stabShiftPx.x * cssScale, -rect.width * (STAB_ZOOM - 1) / 2, rect.width * (STAB_ZOOM - 1) / 2);
+  const dyCss = clamp(stabShiftPx.y * cssScale, -rect.height * (STAB_ZOOM - 1) / 2, rect.height * (STAB_ZOOM - 1) / 2);
+  const t = `scale(${STAB_ZOOM}) translate(${(dxCss / STAB_ZOOM).toFixed(2)}px, ${(dyCss / STAB_ZOOM).toFixed(2)}px)`;
+  video.style.transform = t;
+  overlay.style.transform = t;
+}
+
+// A partir de un punto de referencia de ESTE cuadro (centroide de la
+// cuadrícula si se detectó, si no la figura más grande), actualiza el
+// desplazamiento a aplicar. Si no hay referencia este cuadro, se
+// mantiene el último desplazamiento (no se "suelta" de golpe).
+function updateStabilization(anchorPoint) {
+  if (!stabToggle.checked) return;
+  if (!anchorPoint) { applyStabTransform(); return; }
+  if (!stabAnchor) stabAnchor = { ...anchorPoint };
+  stabShiftPx = { x: stabAnchor.x - anchorPoint.x, y: stabAnchor.y - anchorPoint.y };
+  stabAnchor.x += (anchorPoint.x - stabAnchor.x) * STAB_ALPHA;
+  stabAnchor.y += (anchorPoint.y - stabAnchor.y) * STAB_ALPHA;
+  applyStabTransform();
+}
+
+function resetStabilization() {
+  stabAnchor = null;
+  stabShiftPx = { x: 0, y: 0 };
+  video.style.transform = '';
+  overlay.style.transform = '';
+}
+
+stabToggle.addEventListener('change', resetStabilization);
+
+// ------------------------------------------------------------------
+// Calibración por referencia de objeto: cuando la cuadrícula SÍ es
+// visible, se recuerda el tamaño en píxeles (en ese instante) de la
+// figura detectada más grande junto con el px/cm de la cuadrícula. Si
+// luego la cuadrícula deja de verse pero esa misma figura sigue en
+// cuadro, se recalcula el px/cm comparando cuánto cambió su tamaño en
+// píxeles — así se detecta que la cámara se acercó o alejó sin
+// necesitar la cuadrícula todo el tiempo.
+// ------------------------------------------------------------------
+let refObject = null; // { pxPerCmAtCal, sizeAtCalPx }
+
+function primaryShape(shapes) {
+  if (!shapes.length) return null;
+  return shapes.reduce((a, b) => (b.areaPx > a.areaPx ? b : a));
+}
+
 function drawVideoOverlay(shapes) {
   const ctx = overlay.getContext('2d');
   ctx.clearRect(0, 0, overlay.width, overlay.height);
@@ -542,31 +611,13 @@ function startLiveLoop() {
   if (liveInterval) clearInterval(liveInterval);
   tracks = [];
   lastStableShapes = [];
+  refObject = null;
   liveInterval = setInterval(() => {
     if (!videoModeActive || video.readyState < 2) return;
 
-    // 1) Calibración automática por cuadrícula (cuadro completo), salvo
-    //    que el usuario haya forzado calibración manual.
-    if (!manualCalToggle.checked) {
-      const g = captureProc(0, 0, video.videoWidth, video.videoHeight, 300);
-      const grid = ShapeDetector.detectGridPxPerCm(g.imageData, cmPerSquare());
-      if (grid) {
-        videoPxPerCm = grid.pxPerCm;
-        setCalBadge(`Auto — ${grid.pxPerCm.toFixed(1)} px/cm (${grid.count} cuadros)`, true);
-      } else if (!videoPxPerCm) {
-        setCalBadge('Buscando cuadrícula…', false);
-      }
-      // si no se detecta pero ya había una calibración previa, se conserva
-    }
-
-    if (!videoPxPerCm) {
-      lastStableShapes = [];
-      tool.redraw();
-      renderResults([], null, outUnitInput.value);
-      return;
-    }
-
-    // 2) Detección de figuras (todo el cuadro, o el área seleccionada)
+    // 1) Detección de figuras SIEMPRE (todo el cuadro, o el área
+    //    seleccionada) — no depende de tener calibración todavía, así
+    //    ya tenemos la figura de referencia lista para los pasos 2 y 3.
     const roi = tool.getRoi();
     const region = roi
       ? { x: clamp(roi.x, 0, video.videoWidth - 10), y: clamp(roi.y, 0, video.videoHeight - 10), w: Math.max(10, roi.w), h: Math.max(10, roi.h) }
@@ -578,8 +629,41 @@ function startLiveLoop() {
     const minAreaPx = Math.max(60, s.pw * s.ph * 0.004);
     let rawShapes = ShapeDetector.detectShapes(s.imageData, { targetShape: targetShapeInput.value, minAreaPx });
     rawShapes = rawShapes.map(sh => remapShape(sh, 1 / s.scale, region.x, region.y));
-
     lastStableShapes = updateTracks(rawShapes);
+
+    // 2) Calibración: cuadrícula automática > referencia de objeto >
+    //    última calibración conocida.
+    if (!manualCalToggle.checked) {
+      const g = captureProc(0, 0, video.videoWidth, video.videoHeight, 300);
+      const grid = ShapeDetector.detectGridPxPerCm(g.imageData, cmPerSquare());
+      const primary = primaryShape(lastStableShapes);
+
+      if (grid) {
+        videoPxPerCm = grid.pxPerCm;
+        setCalBadge(`Auto — ${grid.pxPerCm.toFixed(1)} px/cm (${grid.count} cuadros)`, true);
+        if (primary) refObject = { pxPerCmAtCal: grid.pxPerCm, sizeAtCalPx: (primary.rectW + primary.rectH) / 2 };
+      } else if (refObject && primary) {
+        const currentSize = (primary.rectW + primary.rectH) / 2;
+        if (currentSize > 0 && refObject.sizeAtCalPx > 0) {
+          videoPxPerCm = refObject.pxPerCmAtCal * (currentSize / refObject.sizeAtCalPx);
+          setCalBadge(`Auto (sin ver la cuadrícula) — ${videoPxPerCm.toFixed(1)} px/cm`, true);
+        }
+      } else if (!videoPxPerCm) {
+        setCalBadge('Buscando cuadrícula…', false);
+      }
+      // si no hay cuadrícula ni referencia pero ya había px/cm previo, se conserva tal cual
+    }
+
+    // 3) Estabilización ligera: usamos la figura principal como ancla.
+    const anchorShape = primaryShape(lastStableShapes);
+    updateStabilization(anchorShape ? { x: anchorShape.cx, y: anchorShape.cy } : null);
+
+    if (!videoPxPerCm) {
+      tool.redraw();
+      renderResults([], null, outUnitInput.value);
+      return;
+    }
+
     tool.redraw();
     renderResults(lastStableShapes, videoPxPerCm, outUnitInput.value);
   }, 280);
@@ -596,6 +680,7 @@ modeButtons.forEach(btn => {
 
     if (m === 'foto') {
       videoModeActive = false;
+      resetStabilization();
       video.hidden = true;
       photoCanvas.hidden = !photoImage;
       btnPickPhoto.hidden = false;
