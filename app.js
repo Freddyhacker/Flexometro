@@ -207,6 +207,7 @@ const toolButtons = { none: document.getElementById('toolNone'), calibrate: docu
 const btnClearRoi = document.getElementById('btnClearRoi');
 
 const modeButtons = document.querySelectorAll('.mode-btn');
+const btnCameraFab = document.getElementById('btnCameraFab');
 const fileInput = document.getElementById('fileInput');
 const btnPickPhoto = document.getElementById('btnPickPhoto');
 const btnStartCam = document.getElementById('btnStartCam');
@@ -535,6 +536,7 @@ btnStartCam.addEventListener('click', async () => {
 
     videoModeActive = true;
     startLiveLoop();
+    btnCameraFab.classList.add('active');
   } catch (err) {
     alert('No pude activar la cámara: ' + err.message);
   }
@@ -720,4 +722,17 @@ modeButtons.forEach(btn => {
       }
     }
   });
+});
+
+// ------------------------------------------------------------------
+// Botón flotante de cámara: un solo toque cambia a modo video Y activa
+// la cámara (no hace falta encontrar el interruptor de abajo primero).
+// ------------------------------------------------------------------
+btnCameraFab.addEventListener('click', () => {
+  document.querySelector('.mode-btn[data-mode="video"]').click();
+  if (!currentStream) {
+    btnStartCam.click();
+  } else {
+    btnCameraFab.classList.add('active');
+  }
 });
