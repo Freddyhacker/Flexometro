@@ -2,170 +2,123 @@
 <html lang="es">
 <head>
 <meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1, user-scalable=no" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
 <title>Medidor · figuras en vivo</title>
 <link rel="stylesheet" href="style.css" />
 </head>
 <body>
 
-  <header class="topbar">
-    <div class="topbar-inner">
-      <span class="brand">
-        <span class="brand-mark">＋</span>
-        <span class="brand-text">MEDIDOR</span>
-      </span>
-      <span class="brand-sub">figuras · en vivo</span>
+  <div id="stage">
+    <video id="video" playsinline autoplay muted hidden></video>
+    <canvas id="photoCanvas" hidden></canvas>
+    <canvas id="overlay"></canvas>
+
+    <div id="emptyHint">
+      <div class="brand-mark">＋</div>
+      <p>Elige una foto o activa la cámara para empezar a medir</p>
     </div>
+  </div>
+
+  <!-- Barra superior -->
+  <header class="hud hud-top">
+    <button class="hud-icon" id="btnSettings" aria-label="Ajustes">⚙️</button>
+    <div class="cal-badge" id="calBadge">Sin calibrar</div>
+    <button class="hud-icon hud-unit" id="btnCycleUnit">cm</button>
   </header>
 
-  <main class="wrap">
+  <!-- Herramientas (calibrar manual / área) -->
+  <div class="tools" id="toolsBar" hidden>
+    <button class="tool-btn" data-tool="none" id="toolNone">👁 Ver</button>
+    <button class="tool-btn" data-tool="calibrate" id="toolCalibrate">📏 Calibrar</button>
+    <button class="tool-btn" data-tool="roi" id="toolRoi">▭ Área</button>
+    <button class="tool-btn tool-ghost" id="btnClearRoi">Borrar área</button>
+  </div>
+  <p class="tool-hint" id="toolHint" hidden></p>
 
-    <!-- PASO 1: calibración -->
-    <section class="card" id="card-calibracion">
-      <div class="card-head">
-        <span class="step">01</span>
-        <h2>Calibración</h2>
-      </div>
-      <p class="hint">
-        Marca dos puntos que sepas cuánto miden en la realidad (por ejemplo,
-        dos esquinas de un cuadro de tu cuadrícula) y escribe esa distancia.
-      </p>
+  <!-- Barra inferior -->
+  <footer class="hud hud-bottom">
+    <div class="mode-switch">
+      <button class="mode-btn active" data-mode="foto">📷</button>
+      <button class="mode-btn" data-mode="video">🎥</button>
+    </div>
 
-      <div class="field-row">
-        <div class="field">
-          <label for="calValue">Distancia real entre los dos puntos</label>
-          <input type="number" id="calValue" value="1" min="0.1" step="0.1" inputmode="decimal" />
-        </div>
-        <div class="field field-unit">
-          <label for="calUnit">Unidad</label>
-          <select id="calUnit">
-            <option value="mm">mm</option>
-            <option value="cm" selected>cm</option>
-            <option value="m">m</option>
-            <option value="in">in</option>
-          </select>
-        </div>
-      </div>
+    <label for="fileInput" class="hud-primary" id="btnPickPhoto">Elegir foto</label>
+    <input type="file" id="fileInput" accept="image/*" capture="environment" hidden />
 
-      <div id="calStatus" class="status status-pending">Sin calibrar — marca 2 puntos abajo</div>
-    </section>
+    <button class="hud-primary" id="btnStartCam" hidden>Activar cámara</button>
+    <button class="hud-primary hud-primary-accent" id="btnDetectPhoto" hidden>Detectar</button>
 
-    <!-- PASO 2: unidad de resultados + figura buscada -->
-    <section class="card">
-      <div class="card-head">
-        <span class="step">02</span>
-        <h2>Resultados</h2>
-      </div>
-      <div class="field-row">
-        <div class="field">
-          <label for="outUnit">Unidad de las medidas</label>
-          <select id="outUnit">
-            <option value="mm">mm</option>
-            <option value="cm" selected>cm</option>
-            <option value="m">m</option>
-            <option value="in">in</option>
-          </select>
-        </div>
-        <div class="field">
-          <label for="targetShape">Figura a buscar</label>
-          <select id="targetShape">
-            <option value="auto">🔍 Automático</option>
-            <option value="circulo">⚪ Círculo</option>
-            <option value="cuadrado">🟥 Cuadrado</option>
-            <option value="rectangulo">▭ Rectángulo</option>
-            <option value="triangulo">🔺 Triángulo</option>
-          </select>
-        </div>
-      </div>
-    </section>
-
-    <!-- PASO 3: modo -->
-    <section class="card">
-      <div class="card-head">
-        <span class="step">03</span>
-        <h2>Modo</h2>
-      </div>
-
-      <div class="tabs">
-        <button class="tab active" data-mode="foto">📷 Foto</button>
-        <button class="tab" data-mode="video">🎥 En vivo</button>
-      </div>
-
-      <!-- MODO FOTO -->
-      <div class="mode-panel" id="panel-foto">
-        <input type="file" id="fileInput" accept="image/*" capture="environment" class="file-input" />
-        <label for="fileInput" class="btn btn-secondary">Elegir / tomar foto</label>
-
-        <div class="viewfinder" id="photoViewfinder" hidden>
-          <canvas id="photoCanvas"></canvas>
-        </div>
-
-        <div class="mode-btns" id="photoModeBtns" hidden>
-          <button class="mbtn active" data-tool="calibrate" data-target="photo">📏 Calibrar</button>
-          <button class="mbtn" data-tool="roi" data-target="photo">▭ Área</button>
-          <button class="mbtn mbtn-ghost" id="btnClearRoiPhoto">Borrar área</button>
-        </div>
-        <p class="hint small" id="photoToolHint">Modo calibrar: toca 2 puntos de distancia conocida.</p>
-
-        <div class="actions" id="photoActions" hidden>
-          <button id="btnDetectPhoto" class="btn btn-accent">Detectar figuras</button>
-          <button id="btnClearCalPhoto" class="btn btn-ghost">Borrar calibración</button>
-        </div>
-      </div>
-
-      <!-- MODO VIDEO -->
-      <div class="mode-panel" id="panel-video" hidden>
-        <div class="field-row" id="cameraSelectRow" hidden>
-          <div class="field">
-            <label for="cameraSelect">Cámara</label>
-            <select id="cameraSelect"></select>
-          </div>
-        </div>
-        <button id="btnStartCam" class="btn btn-secondary">Activar cámara</button>
-
-        <div class="viewfinder" id="videoViewfinder" hidden>
-          <video id="video" playsinline autoplay muted></video>
-          <canvas id="videoOverlay"></canvas>
-        </div>
-
-        <div class="mode-btns" id="videoModeBtns" hidden>
-          <button class="mbtn active" data-tool="calibrate" data-target="video">📏 Calibrar</button>
-          <button class="mbtn" data-tool="roi" data-target="video">▭ Área</button>
-          <button class="mbtn mbtn-ghost" id="btnClearRoiVideo">Borrar área</button>
-        </div>
-        <label class="checkbox-row" id="stabRow" hidden>
-          <input type="checkbox" id="stabToggle" checked />
-          <span>🩹 Estabilizar imagen (recorta ~12% del encuadre)</span>
-        </label>
-        <p class="hint small" id="videoToolHint">Modo calibrar: congela la imagen y toca 2 puntos.</p>
-
-        <div class="actions" id="videoActions" hidden>
-          <button id="btnFreezeCal" class="btn btn-accent">Congelar y calibrar</button>
-          <button id="btnResumeLive" class="btn btn-secondary" hidden>Reanudar en vivo</button>
-          <button id="btnClearCalVideo" class="btn btn-ghost">Borrar calibración</button>
-        </div>
-
-        <p class="hint small">
-          El video se procesa en tu propio celular/computadora — no se envía a
-          ningún servidor.
-        </p>
-      </div>
-    </section>
-
-    <!-- RESULTADOS -->
-    <section class="card" id="card-results" hidden>
-      <div class="card-head">
-        <span class="step">＝</span>
-        <h2>Figuras detectadas</h2>
-      </div>
-      <div id="resultsList" class="results-list"></div>
-    </section>
-
-  </main>
-
-  <footer class="foot">
-    <p>Todo corre en tu navegador. Sin servidores, sin servicios externos.</p>
+    <button class="hud-icon" id="btnResultsToggle">
+      <span id="resultsCount">0</span>
+    </button>
   </footer>
+
+  <!-- Panel de resultados deslizable -->
+  <div class="sheet collapsed" id="resultsSheet">
+    <div class="sheet-handle" id="sheetHandle"></div>
+    <div id="resultsSummary" class="sheet-summary">Sin figuras detectadas</div>
+    <div id="resultsList" class="results-list"></div>
+  </div>
+
+  <!-- Panel de ajustes -->
+  <div class="panel-backdrop" id="settingsBackdrop" hidden></div>
+  <div class="panel" id="settingsPanel" hidden>
+    <div class="panel-head">
+      <h2>Ajustes</h2>
+      <button class="hud-icon" id="btnCloseSettings">✕</button>
+    </div>
+
+    <div class="panel-section">
+      <label class="panel-label">Tamaño real de cada cuadro de tu cuadrícula</label>
+      <div class="field-row">
+        <input type="number" id="calValue" value="1" min="0.1" step="0.1" inputmode="decimal" />
+        <select id="calUnit">
+          <option value="mm">mm</option>
+          <option value="cm" selected>cm</option>
+          <option value="m">m</option>
+          <option value="in">in</option>
+        </select>
+      </div>
+      <p class="panel-hint">
+        Pon una cuadrícula/papel cuadriculado frente a la cámara: la app
+        detecta el tamaño de los cuadros sola y recalcula la escala todo
+        el tiempo (si te acercas o alejas, se ajusta automáticamente).
+      </p>
+    </div>
+
+    <div class="panel-section">
+      <label class="panel-label">Unidad de los resultados</label>
+      <select id="outUnit">
+        <option value="mm">mm</option>
+        <option value="cm" selected>cm</option>
+        <option value="m">m</option>
+        <option value="in">in</option>
+      </select>
+    </div>
+
+    <div class="panel-section">
+      <label class="panel-label">Figura a buscar</label>
+      <select id="targetShape">
+        <option value="auto">🔍 Automático</option>
+        <option value="circulo">⚪ Círculo</option>
+        <option value="cuadrado">🟥 Cuadrado</option>
+        <option value="rectangulo">▭ Rectángulo</option>
+        <option value="triangulo">🔺 Triángulo</option>
+      </select>
+    </div>
+
+    <div class="panel-section">
+      <label class="panel-label" for="cameraSelect">Cámara</label>
+      <select id="cameraSelect"></select>
+    </div>
+
+    <div class="panel-section">
+      <label class="checkbox-row">
+        <input type="checkbox" id="manualCalToggle" />
+        <span>Usar calibración manual (2 puntos) en vez de la cuadrícula automática</span>
+      </label>
+    </div>
+  </div>
 
   <script src="detector.js"></script>
   <script src="app.js"></script>
