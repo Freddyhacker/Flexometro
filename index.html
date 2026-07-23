@@ -58,11 +58,9 @@
     </button>
   </footer>
 
-  <!-- Panel de resultados deslizable -->
-  <div class="sheet collapsed" id="resultsSheet">
-    <div class="sheet-handle" id="sheetHandle"></div>
-    <div id="resultsSummary" class="sheet-summary">Sin figuras detectadas</div>
-    <div id="resultsList" class="results-list"></div>
+  <!-- Chip de "figura enfocada" -->
+  <div class="focus-chip" id="focusChip" hidden>
+    🔍 Enfocado — <button id="btnClearFocus">ver todas</button>
   </div>
 
   <!-- Panel de ajustes -->
@@ -74,6 +72,15 @@
     </div>
 
     <div class="panel-section">
+      <label class="panel-label">Cómo calibrar la escala</label>
+      <select id="calSource">
+        <option value="grid">📐 Cuadrícula automática</option>
+        <option value="refobject">💳 Objeto de referencia conocido</option>
+        <option value="manual">📏 Manual (2 puntos)</option>
+      </select>
+    </div>
+
+    <div class="panel-section" id="gridSection">
       <label class="panel-label">Tamaño real de cada cuadro de tu cuadrícula</label>
       <div class="field-row">
         <input type="number" id="calValue" value="1" min="0.1" step="0.1" inputmode="decimal" />
@@ -88,6 +95,22 @@
         Pon una cuadrícula/papel cuadriculado frente a la cámara: la app
         detecta el tamaño de los cuadros sola y recalcula la escala todo
         el tiempo (si te acercas o alejas, se ajusta automáticamente).
+      </p>
+    </div>
+
+    <div class="panel-section" id="refObjectSection" hidden>
+      <label class="panel-label">Objeto de referencia</label>
+      <select id="refObjectType">
+        <option value="tarjeta">💳 Tarjeta (crédito/ID) — 85.6 × 54 mm</option>
+        <option value="a4">📄 Hoja A4 — 210 × 297 mm</option>
+        <option value="carta">📄 Hoja carta (Letter) — 216 × 279 mm</option>
+        <option value="moneda1">🪙 Moneda ~24 mm de diámetro</option>
+      </select>
+      <p class="panel-hint">
+        Pon ese objeto bien visible frente a la cámara, junto a lo que
+        quieres medir (o dentro del área seleccionada). La app lo
+        reconoce y calibra sola, recalculando si te acercas o alejas —
+        sin necesitar una cuadrícula impresa.
       </p>
     </div>
 
@@ -113,6 +136,17 @@
     </div>
 
     <div class="panel-section">
+      <label class="panel-label">Cuántas figuras identificar</label>
+      <select id="maxShapesSelect">
+        <option value="1">Solo 1 (la más grande)</option>
+        <option value="3" selected>Hasta 3</option>
+        <option value="5">Hasta 5</option>
+        <option value="10">Hasta 10</option>
+        <option value="25">Todas las que encuentre</option>
+      </select>
+    </div>
+
+    <div class="panel-section">
       <label class="panel-label" for="cameraSelect">Cámara</label>
       <select id="cameraSelect"></select>
     </div>
@@ -120,14 +154,7 @@
     <div class="panel-section">
       <label class="checkbox-row">
         <input type="checkbox" id="stabToggle" checked />
-        <span>🩹 Estabilizar imagen en video (reduce el temblor de la mano)</span>
-      </label>
-    </div>
-
-    <div class="panel-section">
-      <label class="checkbox-row">
-        <input type="checkbox" id="manualCalToggle" />
-        <span>Usar calibración manual (2 puntos) en vez de la cuadrícula automática</span>
+        <span>🩹 Estabilizar imagen en video (usa la figura detectada y el giroscopio del celular, si está disponible)</span>
       </label>
     </div>
   </div>
