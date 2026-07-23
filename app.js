@@ -11,6 +11,15 @@ const SHAPE_LABELS = {
   triangulo: 'Triángulo', poligono: 'Polígono',
 };
 
+// Objetos con medida real conocida, usados como referencia de calibración
+// alternativa a la cuadrícula (no todos tienen una cuadrícula a mano).
+const REFERENCE_OBJECTS = {
+  tarjeta: { kind: 'rect', wMm: 85.6, hMm: 54 },
+  a4: { kind: 'rect', wMm: 210, hMm: 297 },
+  carta: { kind: 'rect', wMm: 215.9, hMm: 279.4 },
+  moneda1: { kind: 'circle', diameterMm: 24 },
+};
+
 // ------------------------------------------------------------------
 // Medidas reales a partir de una figura detectada (en píxeles) + escala
 // ------------------------------------------------------------------
@@ -48,13 +57,6 @@ function convertMeasurements(m, unit) {
   return out;
 }
 
-const METRIC_LABELS = {
-  area_cm2: 'Área', perimetro_cm: 'Perímetro', radio_cm: 'Radio',
-  diametro_cm: 'Diámetro', circunferencia_cm: 'Circunferencia',
-  largo_cm: 'Largo', ancho_cm: 'Ancho', diagonal_cm: 'Diagonal',
-  ancho_aprox_cm: 'Ancho aprox.', alto_aprox_cm: 'Alto aprox.',
-};
-
 function mainLabel(m, unit) {
   const f = UNIT_FACTORS[unit];
   if (m.shapeType === 'circulo') return `${SHAPE_LABELS.circulo} D:${(m.diametro_cm * f).toFixed(1)}${unit}`;
@@ -63,10 +65,12 @@ function mainLabel(m, unit) {
   return `${SHAPE_LABELS[m.shapeType] || m.shapeType} P:${(m.perimetro_cm * f).toFixed(1)}${unit}`;
 }
 
-function drawShapeOutline(ctx, s) {
+function drawShapeOutline(ctx, s, highlight) {
   const useRect = (s.shapeType === 'cuadrado' || s.shapeType === 'rectangulo');
   const pts = useRect ? s.corners : s.hull;
   if (!pts || pts.length < 3) return;
+  ctx.lineWidth = highlight ? 4 : 3;
+  ctx.strokeStyle = highlight ? '#e8622c' : '#2f6f5e';
   ctx.beginPath();
   ctx.moveTo(pts[0].x, pts[0].y);
   for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
@@ -86,22 +90,65 @@ function remapShape(s, scale, offsetX, offsetY) {
   };
 }
 
-function drawShapeAndLabel(ctx, s, pxPerCm, unit) {
-  drawShapeOutline(ctx, s);
+function drawShapeAndLabel(ctx, s, pxPerCm, unit, highlight) {
+  drawShapeOutline(ctx, s, highlight);
   const label = mainLabel(computeMeasurements(s, pxPerCm), unit);
+  ctx.font = 'bold 16px monospace';
   const tw = ctx.measureText(label).width;
-  ctx.fillStyle = '#2f6f5e';
+  ctx.fillStyle = highlight ? '#e8622c' : '#2f6f5e';
   ctx.fillRect(s.minX, Math.max(0, s.minY - 22), tw + 10, 22);
   ctx.fillStyle = '#ffffff';
   ctx.fillText(label, s.minX + 5, Math.max(16, s.minY - 6));
 }
 
+function hitTestShapes(shapes, x, y) {
+  let best = null, bestArea = Infinity;
+  shapes.forEach(s => {
+    if (x >= s.minX && x <= s.maxX && y >= s.minY && y <= s.maxY && s.areaPx < bestArea) {
+      bestArea = s.areaPx; best = s;
+    }
+  });
+  return best;
+}
+
 function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 
 // ------------------------------------------------------------------
-// Herramienta de interacción (calibrar 2 puntos / seleccionar área) —
-// UNA sola instancia reutilizada para el canvas #overlay, tanto en modo
-// foto como en modo video (baseDrawFn/callbacks se reconfiguran).
+// Calibración por objeto de referencia: busca, entre las figuras YA
+// detectadas, la que mejor coincide con el tipo/proporciones del objeto
+// elegido (tarjeta, hoja, moneda...) y calibra a partir de su tamaño
+// real conocido. No necesita una cuadrícula impresa.
+// ------------------------------------------------------------------
+function detectReferenceCalibration(shapes, refKey) {
+  const ref = REFERENCE_OBJECTS[refKey];
+  if (!ref || !shapes.length) return null;
+
+  if (ref.kind === 'circle') {
+    const circles = shapes.filter(s => s.shapeType === 'circulo');
+    if (!circles.length) return null;
+    const c = circles.reduce((a, b) => (b.areaPx > a.areaPx ? b : a));
+    const diameterPx = (c.rectW + c.rectH) / 2;
+    return { pxPerCm: diameterPx / (ref.diameterMm / 10), matched: c };
+  }
+
+  const rects = shapes.filter(s => s.shapeType === 'rectangulo' || s.shapeType === 'cuadrado');
+  if (!rects.length) return null;
+  const targetAspect = Math.max(ref.wMm, ref.hMm) / Math.min(ref.wMm, ref.hMm);
+  let best = null, bestDiff = Infinity;
+  rects.forEach(r => {
+    const aspect = Math.max(r.rectW, r.rectH) / Math.max(1, Math.min(r.rectW, r.rectH));
+    const diff = Math.abs(aspect - targetAspect) / targetAspect;
+    if (diff < bestDiff) { bestDiff = diff; best = r; }
+  });
+  if (!best || bestDiff > 0.25) return null; // tolerancia de proporción (~25%)
+  const realLongMm = Math.max(ref.wMm, ref.hMm);
+  return { pxPerCm: best.rectW / (realLongMm / 10), matched: best };
+}
+
+// ------------------------------------------------------------------
+// Herramienta de interacción (calibrar 2 puntos / seleccionar área /
+// tocar para enfocar una figura) — UNA sola instancia reutilizada para
+// el canvas #overlay, tanto en modo foto como en modo video.
 // ------------------------------------------------------------------
 function makeInteractiveCanvas(canvas) {
   let baseDrawFn = () => {};
@@ -163,17 +210,22 @@ function makeInteractiveCanvas(canvas) {
     redraw();
   });
   canvas.addEventListener('click', (e) => {
-    if (mode !== 'calibrate') return;
     const p = toCanvasCoords(e);
-    if (calPoints.length >= 2) calPoints = [];
-    calPoints.push(p);
-    redraw();
-    if (calPoints.length === 2) {
-      const distPx = Math.hypot(calPoints[1].x - calPoints[0].x, calPoints[1].y - calPoints[0].y);
-      const calValue = parseFloat(calValueInput.value) || 1;
-      const calUnit = calUnitInput.value;
-      const pxPerCm = (distPx / calValue) * UNIT_FACTORS[calUnit];
-      callbacks.onCalibrated && callbacks.onCalibrated(pxPerCm);
+    if (mode === 'calibrate') {
+      if (calPoints.length >= 2) calPoints = [];
+      calPoints.push(p);
+      redraw();
+      if (calPoints.length === 2) {
+        const distPx = Math.hypot(calPoints[1].x - calPoints[0].x, calPoints[1].y - calPoints[0].y);
+        const calValue = parseFloat(calValueInput.value) || 1;
+        const calUnit = calUnitInput.value;
+        const pxPerCm = (distPx / calValue) * UNIT_FACTORS[calUnit];
+        callbacks.onCalibrated && callbacks.onCalibrated(pxPerCm);
+      }
+      return;
+    }
+    if (mode === 'none') {
+      callbacks.onFocusTap && callbacks.onFocusTap(p);
     }
   });
 
@@ -215,20 +267,22 @@ const btnDetectPhoto = document.getElementById('btnDetectPhoto');
 
 const btnResultsToggle = document.getElementById('btnResultsToggle');
 const resultsCount = document.getElementById('resultsCount');
-const resultsSheet = document.getElementById('resultsSheet');
-const sheetHandle = document.getElementById('sheetHandle');
-const resultsSummary = document.getElementById('resultsSummary');
-const resultsList = document.getElementById('resultsList');
+const focusChip = document.getElementById('focusChip');
+const btnClearFocus = document.getElementById('btnClearFocus');
 
 const settingsBackdrop = document.getElementById('settingsBackdrop');
 const settingsPanel = document.getElementById('settingsPanel');
 const btnCloseSettings = document.getElementById('btnCloseSettings');
+const calSourceInput = document.getElementById('calSource');
+const gridSection = document.getElementById('gridSection');
+const refObjectSection = document.getElementById('refObjectSection');
+const refObjectTypeInput = document.getElementById('refObjectType');
 const calValueInput = document.getElementById('calValue');
 const calUnitInput = document.getElementById('calUnit');
 const outUnitInput = document.getElementById('outUnit');
 const targetShapeInput = document.getElementById('targetShape');
+const maxShapesInput = document.getElementById('maxShapesSelect');
 const cameraSelect = document.getElementById('cameraSelect');
-const manualCalToggle = document.getElementById('manualCalToggle');
 const stabToggle = document.getElementById('stabToggle');
 
 const tool = makeInteractiveCanvas(overlay);
@@ -236,42 +290,27 @@ const tool = makeInteractiveCanvas(overlay);
 function cmPerSquare() {
   return (parseFloat(calValueInput.value) || 1) / UNIT_FACTORS[calUnitInput.value];
 }
+function maxShapes() { return parseInt(maxShapesInput.value, 10) || 3; }
 
 // ------------------------------------------------------------------
-// Resultados (panel deslizable)
+// Contador de resultados + chip de "enfocado"
 // ------------------------------------------------------------------
-function renderResults(shapes, pxPerCm, unit) {
-  resultsCount.textContent = shapes.length;
-  if (!shapes.length || !pxPerCm) {
-    resultsSummary.textContent = 'Sin figuras detectadas';
-    resultsList.innerHTML = '';
-    return;
-  }
-  resultsSummary.textContent = `${shapes.length} figura(s) detectada(s) — toca para ver detalle`;
-  const unitArea = `${unit}²`;
-  resultsList.innerHTML = shapes.map((s, i) => {
-    const m = computeMeasurements(s, pxPerCm);
-    const conv = convertMeasurements(m, unit);
-    const metrics = Object.entries(conv).filter(([k]) => k !== 'shapeType').map(([k, v]) => {
-      const label = METRIC_LABELS[k] || k;
-      const u = k === 'area_cm2' ? unitArea : unit;
-      return `<div class="result-metric"><div class="k">${label} (${u})</div><div class="v">${v.toFixed(2)}</div></div>`;
-    }).join('');
-    return `<div class="result-item">
-      <div class="result-head"><span class="idx">#${i + 1}</span> ${SHAPE_LABELS[s.shapeType] || s.shapeType}</div>
-      <div class="result-body">${metrics}</div>
-    </div>`;
-  }).join('');
-}
+function updateResultsCount(n) { resultsCount.textContent = n; }
 
-function toggleSheet(forceOpen) {
-  const collapsed = resultsSheet.classList.contains('collapsed');
-  if (forceOpen === true || (forceOpen === undefined && collapsed)) resultsSheet.classList.remove('collapsed');
-  else resultsSheet.classList.add('collapsed');
+let focusedTrackId = null;
+let focusedPhotoIndex = null;
+
+function updateFocusChipUI() {
+  focusChip.hidden = (focusedTrackId == null && focusedPhotoIndex == null);
 }
-sheetHandle.addEventListener('click', () => toggleSheet());
-resultsSummary.addEventListener('click', () => toggleSheet());
-btnResultsToggle.addEventListener('click', () => toggleSheet());
+function clearFocus() {
+  focusedTrackId = null;
+  focusedPhotoIndex = null;
+  updateFocusChipUI();
+  tool.redraw();
+}
+btnClearFocus.addEventListener('click', clearFocus);
+btnResultsToggle.addEventListener('click', clearFocus);
 
 // ------------------------------------------------------------------
 // Ajustes (panel)
@@ -291,19 +330,32 @@ btnCycleUnit.addEventListener('click', () => {
 outUnitInput.addEventListener('change', syncUnitButton);
 syncUnitButton();
 
+function syncCalSourceUI() {
+  const v = calSourceInput.value;
+  gridSection.hidden = v !== 'grid';
+  refObjectSection.hidden = v !== 'refobject';
+}
+calSourceInput.addEventListener('change', () => {
+  syncCalSourceUI();
+  videoPxPerCm = null;
+  photoPxPerCm = null;
+  setCalBadge('Cambiaste la fuente de calibración — recalibrando…', false);
+});
+syncCalSourceUI();
+
 function setCalBadge(text, ok) {
   calBadge.textContent = text;
   calBadge.classList.toggle('ok', !!ok);
 }
 
 // ------------------------------------------------------------------
-// Herramientas (calibrar / área)
+// Herramientas (calibrar / área / ver-enfocar)
 // ------------------------------------------------------------------
 function setActiveTool(name) {
   tool.setMode(name);
   Object.entries(toolButtons).forEach(([k, btn]) => btn.classList.toggle('active', k === name));
   const hints = {
-    none: '',
+    none: 'Toca una figura para enfocarla.',
     calibrate: 'Toca 2 puntos de distancia real conocida sobre la imagen.',
     roi: 'Arrastra un rectángulo sobre la zona que quieres analizar.',
   };
@@ -321,10 +373,22 @@ btnClearRoi.addEventListener('click', () => tool.clearRoi());
 const MAX_PHOTO_WIDTH = 1400;
 let photoImage = null;
 let photoPxPerCm = null;
+let lastPhotoShapes = [];
 
 function drawPhotoBase(ctx) {
   ctx.clearRect(0, 0, photoCanvas.width, photoCanvas.height);
   if (photoImage) ctx.drawImage(photoImage, 0, 0, photoCanvas.width, photoCanvas.height);
+}
+
+function renderPhotoShapes() {
+  tool.redraw();
+  if (!photoPxPerCm || !lastPhotoShapes.length) return;
+  const octx = overlay.getContext('2d');
+  const shown = focusedPhotoIndex != null && lastPhotoShapes[focusedPhotoIndex]
+    ? [lastPhotoShapes[focusedPhotoIndex]]
+    : lastPhotoShapes;
+  shown.forEach(s => drawShapeAndLabel(octx, s, photoPxPerCm, outUnitInput.value, shown.length === 1 && lastPhotoShapes.length > 1));
+  updateResultsCount(lastPhotoShapes.length);
 }
 
 fileInput.addEventListener('change', (e) => {
@@ -344,30 +408,51 @@ fileInput.addEventListener('change', (e) => {
     btnDetectPhoto.hidden = false;
     toolsBar.hidden = false;
     photoPxPerCm = null;
+    lastPhotoShapes = [];
+    focusedPhotoIndex = null;
+    updateFocusChipUI();
 
     tool.setBaseDrawFn(drawPhotoBase);
     tool.setCallbacks({
       onCalibrated: (pxPerCm) => {
         photoPxPerCm = pxPerCm;
-        manualCalToggle.checked = true;
+        calSourceInput.value = 'manual';
         setCalBadge(`Manual — ${pxPerCm.toFixed(1)} px/cm`, true);
       },
       onRoiSet: () => {},
+      onFocusTap: (p) => {
+        const hit = hitTestShapes(lastPhotoShapes, p.x, p.y);
+        focusedPhotoIndex = hit ? lastPhotoShapes.indexOf(hit) : null;
+        updateFocusChipUI();
+        renderPhotoShapes();
+      },
     });
     setActiveTool('none');
     tool.redraw();
 
-    // Intento de calibración automática por cuadrícula (una sola vez)
-    if (!manualCalToggle.checked) {
-      const ctx = photoCanvas.getContext('2d');
-      const imgData = ctx.getImageData(0, 0, photoCanvas.width, photoCanvas.height);
+    // Calibración automática (cuadrícula u objeto de referencia) al cargar la foto
+    const ctx = photoCanvas.getContext('2d');
+    const imgData = ctx.getImageData(0, 0, photoCanvas.width, photoCanvas.height);
+    if (calSourceInput.value === 'grid') {
       const grid = ShapeDetector.detectGridPxPerCm(imgData, cmPerSquare());
       if (grid) {
         photoPxPerCm = grid.pxPerCm;
-        setCalBadge(`Auto — ${grid.pxPerCm.toFixed(1)} px/cm (${grid.count} cuadros)`, true);
+        setCalBadge(`Auto (cuadrícula) — ${grid.pxPerCm.toFixed(1)} px/cm`, true);
       } else {
         setCalBadge('Sin cuadrícula — usa 📏 Calibrar', false);
       }
+    } else if (calSourceInput.value === 'refobject') {
+      const minAreaPx = Math.max(150, photoCanvas.width * photoCanvas.height * 0.004);
+      const probe = ShapeDetector.detectShapes(imgData, { targetShape: 'auto', minAreaPx, maxShapes: 25 });
+      const ref = detectReferenceCalibration(probe, refObjectTypeInput.value);
+      if (ref) {
+        photoPxPerCm = ref.pxPerCm;
+        setCalBadge(`Auto (objeto ref.) — ${ref.pxPerCm.toFixed(1)} px/cm`, true);
+      } else {
+        setCalBadge('No vi el objeto de referencia — usa 📏 Calibrar', false);
+      }
+    } else {
+      setCalBadge('Sin calibrar — usa 📏 Calibrar', false);
     }
   };
   img.src = URL.createObjectURL(file);
@@ -375,7 +460,7 @@ fileInput.addEventListener('change', (e) => {
 
 btnDetectPhoto.addEventListener('click', () => {
   if (!photoImage) return;
-  if (!photoPxPerCm) { alert('Primero calibra: pon una cuadrícula en la foto, o usa "📏 Calibrar" para marcar 2 puntos.'); return; }
+  if (!photoPxPerCm) { alert('Primero calibra: pon una cuadrícula/objeto de referencia en la foto, o usa "📏 Calibrar" para marcar 2 puntos.'); return; }
 
   const ctx = photoCanvas.getContext('2d');
   const roi = tool.getRoi();
@@ -385,17 +470,15 @@ btnDetectPhoto.addEventListener('click', () => {
 
   const imageData = ctx.getImageData(region.x, region.y, region.w, region.h);
   const minAreaPx = Math.max(150, region.w * region.h * 0.004);
-  let shapes = ShapeDetector.detectShapes(imageData, { targetShape: targetShapeInput.value, minAreaPx });
+  let shapes = ShapeDetector.detectShapes(imageData, { targetShape: targetShapeInput.value, minAreaPx, maxShapes: maxShapes() });
   shapes = shapes.map(s => remapShape(s, 1, region.x, region.y));
 
-  tool.redraw();
-  const octx = overlay.getContext('2d');
-  octx.lineWidth = 3; octx.strokeStyle = '#2f6f5e'; octx.font = 'bold 16px monospace';
-  shapes.forEach(s => drawShapeAndLabel(octx, s, photoPxPerCm, outUnitInput.value));
+  lastPhotoShapes = shapes;
+  focusedPhotoIndex = null;
+  updateFocusChipUI();
 
   if (!shapes.length) alert('No encontré figuras. Prueba con más contraste, mejor luz, o ajusta el área seleccionada.');
-  renderResults(shapes, photoPxPerCm, outUnitInput.value);
-  toggleSheet(true);
+  renderPhotoShapes();
 });
 
 // ==================================================================
@@ -410,38 +493,59 @@ const PROC_WIDTH = 280;
 const procCanvas = document.createElement('canvas');
 
 // ------------------------------------------------------------------
-// Estabilización LIGERA: en vez de redibujar el video pixel por pixel
-// en un canvas cada cuadro (costoso, causaba trabas), se aplica un
-// pequeño desplazamiento con CSS `transform` directamente al <video> y
-// al overlay — eso lo compone la GPU, prácticamente gratis. El video se
-// graba con un ligero zoom de más (margen) para poder desplazarlo sin
-// que se vean los bordes.
+// Estabilización: combina (1) un ancla visual (la figura detectada,
+// suavizada entre cuadros) y (2) el giroscopio del celular si está
+// disponible, para reaccionar más rápido que solo con visión. Se aplica
+// con CSS `transform` directamente al <video> — lo procesa la GPU, no
+// se toca ni un píxel del video.
 // ------------------------------------------------------------------
-const STAB_ZOOM = 1.08;
+const STAB_ZOOM = 1.20; // más recorte = más margen para compensar temblor
 const STAB_ALPHA = 0.18;
-let stabAnchor = null;   // {x,y} en coords de video crudo, suavizado
-let stabShiftPx = { x: 0, y: 0 }; // último desplazamiento aplicado (coords de video crudo)
+let stabAnchor = null;
+let stabShiftPx = { x: 0, y: 0 };
+let gyroShiftPx = { x: 0, y: 0 };
+let gyroBaseline = null;
+let gyroActive = false;
+
+function onDeviceOrientation(e) {
+  if (e.beta == null || e.gamma == null) return;
+  if (!gyroBaseline) { gyroBaseline = { beta: e.beta, gamma: e.gamma }; return; }
+  const dBeta = e.beta - gyroBaseline.beta;
+  const dGamma = e.gamma - gyroBaseline.gamma;
+  const assumedFovDeg = 65; // aproximación típica de cámara trasera de celular
+  const pxPerDegree = (video.videoWidth || 1280) / assumedFovDeg;
+  gyroShiftPx = { x: -dGamma * pxPerDegree, y: dBeta * pxPerDegree };
+  applyStabTransform();
+}
+
+async function enableGyro() {
+  if (gyroActive) return;
+  try {
+    if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+      const res = await DeviceOrientationEvent.requestPermission(); // requiere gesto del usuario (iOS)
+      if (res !== 'granted') return;
+    } else if (typeof DeviceOrientationEvent === 'undefined') {
+      return; // no soportado en este navegador/dispositivo
+    }
+    window.addEventListener('deviceorientation', onDeviceOrientation);
+    gyroActive = true;
+  } catch (e) { /* sin giroscopio disponible; seguimos solo con estabilización visual */ }
+}
 
 function applyStabTransform() {
-  if (!stabToggle.checked) {
-    video.style.transform = '';
-    overlay.style.transform = '';
-    return;
-  }
+  if (!stabToggle.checked) { video.style.transform = ''; overlay.style.transform = ''; return; }
   const rect = video.getBoundingClientRect();
   if (!rect.width || !video.videoWidth) return;
   const cssScale = rect.width / video.videoWidth;
-  const dxCss = clamp(stabShiftPx.x * cssScale, -rect.width * (STAB_ZOOM - 1) / 2, rect.width * (STAB_ZOOM - 1) / 2);
-  const dyCss = clamp(stabShiftPx.y * cssScale, -rect.height * (STAB_ZOOM - 1) / 2, rect.height * (STAB_ZOOM - 1) / 2);
+  const totalX = stabShiftPx.x + gyroShiftPx.x;
+  const totalY = stabShiftPx.y + gyroShiftPx.y;
+  const dxCss = clamp(totalX * cssScale, -rect.width * (STAB_ZOOM - 1) / 2, rect.width * (STAB_ZOOM - 1) / 2);
+  const dyCss = clamp(totalY * cssScale, -rect.height * (STAB_ZOOM - 1) / 2, rect.height * (STAB_ZOOM - 1) / 2);
   const t = `scale(${STAB_ZOOM}) translate(${(dxCss / STAB_ZOOM).toFixed(2)}px, ${(dyCss / STAB_ZOOM).toFixed(2)}px)`;
   video.style.transform = t;
   overlay.style.transform = t;
 }
 
-// A partir de un punto de referencia de ESTE cuadro (centroide de la
-// cuadrícula si se detectó, si no la figura más grande), actualiza el
-// desplazamiento a aplicar. Si no hay referencia este cuadro, se
-// mantiene el último desplazamiento (no se "suelta" de golpe).
 function updateStabilization(anchorPoint) {
   if (!stabToggle.checked) return;
   if (!anchorPoint) { applyStabTransform(); return; }
@@ -449,45 +553,48 @@ function updateStabilization(anchorPoint) {
   stabShiftPx = { x: stabAnchor.x - anchorPoint.x, y: stabAnchor.y - anchorPoint.y };
   stabAnchor.x += (anchorPoint.x - stabAnchor.x) * STAB_ALPHA;
   stabAnchor.y += (anchorPoint.y - stabAnchor.y) * STAB_ALPHA;
+  // El giroscopio solo debe compensar el temblor OCURRIDO DESDE esta
+  // corrección visual (no acumular desviación indefinidamente).
+  gyroBaseline = null;
+  gyroShiftPx = { x: 0, y: 0 };
   applyStabTransform();
 }
 
 function resetStabilization() {
   stabAnchor = null;
   stabShiftPx = { x: 0, y: 0 };
+  gyroShiftPx = { x: 0, y: 0 };
+  gyroBaseline = null;
   video.style.transform = '';
   overlay.style.transform = '';
 }
-
 stabToggle.addEventListener('change', resetStabilization);
-
-// ------------------------------------------------------------------
-// Calibración por referencia de objeto: cuando la cuadrícula SÍ es
-// visible, se recuerda el tamaño en píxeles (en ese instante) de la
-// figura detectada más grande junto con el px/cm de la cuadrícula. Si
-// luego la cuadrícula deja de verse pero esa misma figura sigue en
-// cuadro, se recalcula el px/cm comparando cuánto cambió su tamaño en
-// píxeles — así se detecta que la cámara se acercó o alejó sin
-// necesitar la cuadrícula todo el tiempo.
-// ------------------------------------------------------------------
-let refObject = null; // { pxPerCmAtCal, sizeAtCalPx }
 
 function primaryShape(shapes) {
   if (!shapes.length) return null;
   return shapes.reduce((a, b) => (b.areaPx > a.areaPx ? b : a));
 }
 
+function shapesToShow(all) {
+  if (focusedTrackId == null) return all;
+  const match = all.find(s => s.id === focusedTrackId);
+  if (!match) { focusedTrackId = null; updateFocusChipUI(); return all; }
+  return [match];
+}
+
 function drawVideoOverlay(shapes) {
   const ctx = overlay.getContext('2d');
   ctx.clearRect(0, 0, overlay.width, overlay.height);
+  updateResultsCount(shapes.length);
   if (!videoPxPerCm) {
     ctx.font = 'bold 16px monospace';
     ctx.fillStyle = '#e8622c';
     ctx.fillText('Buscando calibración…', 14, 30);
     return;
   }
-  ctx.lineWidth = 3; ctx.strokeStyle = '#2f6f5e'; ctx.font = 'bold 16px monospace';
-  shapes.forEach(s => drawShapeAndLabel(ctx, s, videoPxPerCm, outUnitInput.value));
+  const shown = shapesToShow(shapes);
+  const highlight = shown.length === 1 && shapes.length > 1;
+  shown.forEach(s => drawShapeAndLabel(ctx, s, videoPxPerCm, outUnitInput.value, highlight));
 }
 
 async function refreshCameraList() {
@@ -522,20 +629,29 @@ btnStartCam.addEventListener('click', async () => {
     toolsBar.hidden = false;
     videoPxPerCm = null;
     tracks = [];
+    focusedTrackId = null;
+    updateFocusChipUI();
 
     tool.setBaseDrawFn(() => drawVideoOverlay(lastStableShapes));
     tool.setCallbacks({
       onCalibrated: (pxPerCm) => {
         videoPxPerCm = pxPerCm;
-        manualCalToggle.checked = true;
+        calSourceInput.value = 'manual';
         setCalBadge(`Manual — ${pxPerCm.toFixed(1)} px/cm`, true);
       },
       onRoiSet: () => {},
+      onFocusTap: (p) => {
+        const hit = hitTestShapes(lastStableShapes, p.x, p.y);
+        focusedTrackId = hit ? hit.id : null;
+        updateFocusChipUI();
+        tool.redraw();
+      },
     });
     setActiveTool('none');
 
     videoModeActive = true;
     startLiveLoop();
+    enableGyro(); // pedido de permiso (iOS) — se llama tras un gesto del usuario
     btnCameraFab.classList.add('active');
   } catch (err) {
     alert('No pude activar la cámara: ' + err.message);
@@ -562,9 +678,11 @@ function captureProc(x, y, w, h, targetWidth) {
 
 // --------------------------------------------------------------
 // Estabilización de MEDIDAS (no de la imagen): seguimiento simple de
-// figuras entre cuadros con suavizado exponencial (EMA).
+// figuras entre cuadros con suavizado exponencial (EMA). Cada figura
+// tiene un id persistente (para "tocar y enfocar").
 // --------------------------------------------------------------
 let tracks = [];
+let nextTrackId = 1;
 const SMOOTH_ALPHA = 0.35;
 const MAX_MISSED_FRAMES = 3;
 
@@ -601,7 +719,7 @@ function updateTracks(rawShapes) {
       } else { t.pendingType = null; }
       used.add(best);
     } else {
-      tracks.push({ ...raw, missed: 0, matched: true });
+      tracks.push({ ...raw, id: nextTrackId++, missed: 0, matched: true });
     }
   });
 
@@ -613,13 +731,11 @@ function startLiveLoop() {
   if (liveInterval) clearInterval(liveInterval);
   tracks = [];
   lastStableShapes = [];
-  refObject = null;
   liveInterval = setInterval(() => {
     if (!videoModeActive || video.readyState < 2) return;
 
     // 1) Detección de figuras SIEMPRE (todo el cuadro, o el área
-    //    seleccionada) — no depende de tener calibración todavía, así
-    //    ya tenemos la figura de referencia lista para los pasos 2 y 3.
+    //    seleccionada) — no depende de tener calibración todavía.
     const roi = tool.getRoi();
     const region = roi
       ? { x: clamp(roi.x, 0, video.videoWidth - 10), y: clamp(roi.y, 0, video.videoHeight - 10), w: Math.max(10, roi.w), h: Math.max(10, roi.h) }
@@ -629,45 +745,37 @@ function startLiveLoop() {
 
     const s = captureProc(region.x, region.y, region.w, region.h, PROC_WIDTH);
     const minAreaPx = Math.max(60, s.pw * s.ph * 0.004);
-    let rawShapes = ShapeDetector.detectShapes(s.imageData, { targetShape: targetShapeInput.value, minAreaPx });
+    let rawShapes = ShapeDetector.detectShapes(s.imageData, { targetShape: targetShapeInput.value, minAreaPx, maxShapes: maxShapes() });
     rawShapes = rawShapes.map(sh => remapShape(sh, 1 / s.scale, region.x, region.y));
     lastStableShapes = updateTracks(rawShapes);
 
-    // 2) Calibración: cuadrícula automática > referencia de objeto >
-    //    última calibración conocida.
-    if (!manualCalToggle.checked) {
+    // 2) Calibración: cuadrícula automática, objeto de referencia, o
+    //    manual (ya establecida por click, no se toca aquí).
+    const source = calSourceInput.value;
+    if (source === 'grid') {
       const g = captureProc(0, 0, video.videoWidth, video.videoHeight, 300);
       const grid = ShapeDetector.detectGridPxPerCm(g.imageData, cmPerSquare());
-      const primary = primaryShape(lastStableShapes);
-
       if (grid) {
         videoPxPerCm = grid.pxPerCm;
-        setCalBadge(`Auto — ${grid.pxPerCm.toFixed(1)} px/cm (${grid.count} cuadros)`, true);
-        if (primary) refObject = { pxPerCmAtCal: grid.pxPerCm, sizeAtCalPx: (primary.rectW + primary.rectH) / 2 };
-      } else if (refObject && primary) {
-        const currentSize = (primary.rectW + primary.rectH) / 2;
-        if (currentSize > 0 && refObject.sizeAtCalPx > 0) {
-          videoPxPerCm = refObject.pxPerCmAtCal * (currentSize / refObject.sizeAtCalPx);
-          setCalBadge(`Auto (sin ver la cuadrícula) — ${videoPxPerCm.toFixed(1)} px/cm`, true);
-        }
+        setCalBadge(`Auto (cuadrícula) — ${grid.pxPerCm.toFixed(1)} px/cm`, true);
       } else if (!videoPxPerCm) {
         setCalBadge('Buscando cuadrícula…', false);
       }
-      // si no hay cuadrícula ni referencia pero ya había px/cm previo, se conserva tal cual
+    } else if (source === 'refobject') {
+      const ref = detectReferenceCalibration(lastStableShapes, refObjectTypeInput.value);
+      if (ref) {
+        videoPxPerCm = ref.pxPerCm;
+        setCalBadge(`Auto (objeto ref.) — ${ref.pxPerCm.toFixed(1)} px/cm`, true);
+      } else if (!videoPxPerCm) {
+        setCalBadge('Buscando objeto de referencia…', false);
+      }
     }
 
-    // 3) Estabilización ligera: usamos la figura principal como ancla.
+    // 3) Estabilización: usamos la figura principal como ancla visual.
     const anchorShape = primaryShape(lastStableShapes);
     updateStabilization(anchorShape ? { x: anchorShape.cx, y: anchorShape.cy } : null);
 
-    if (!videoPxPerCm) {
-      tool.redraw();
-      renderResults([], null, outUnitInput.value);
-      return;
-    }
-
     tool.redraw();
-    renderResults(lastStableShapes, videoPxPerCm, outUnitInput.value);
   }, 280);
 }
 
@@ -679,6 +787,7 @@ modeButtons.forEach(btn => {
     modeButtons.forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
     const m = btn.dataset.mode;
+    clearFocus();
 
     if (m === 'foto') {
       videoModeActive = false;
@@ -694,11 +803,17 @@ modeButtons.forEach(btn => {
         overlay.width = photoCanvas.width; overlay.height = photoCanvas.height;
         tool.setBaseDrawFn(drawPhotoBase);
         tool.setCallbacks({
-          onCalibrated: (pxPerCm) => { photoPxPerCm = pxPerCm; manualCalToggle.checked = true; setCalBadge(`Manual — ${pxPerCm.toFixed(1)} px/cm`, true); },
+          onCalibrated: (pxPerCm) => { photoPxPerCm = pxPerCm; calSourceInput.value = 'manual'; setCalBadge(`Manual — ${pxPerCm.toFixed(1)} px/cm`, true); },
           onRoiSet: () => {},
+          onFocusTap: (p) => {
+            const hit = hitTestShapes(lastPhotoShapes, p.x, p.y);
+            focusedPhotoIndex = hit ? lastPhotoShapes.indexOf(hit) : null;
+            updateFocusChipUI();
+            renderPhotoShapes();
+          },
         });
         setCalBadge(photoPxPerCm ? `${photoPxPerCm.toFixed(1)} px/cm` : 'Sin calibrar', !!photoPxPerCm);
-        tool.redraw();
+        renderPhotoShapes();
       }
     } else {
       photoCanvas.hidden = true;
@@ -713,8 +828,14 @@ modeButtons.forEach(btn => {
         overlay.width = video.videoWidth; overlay.height = video.videoHeight;
         tool.setBaseDrawFn(() => drawVideoOverlay(lastStableShapes));
         tool.setCallbacks({
-          onCalibrated: (pxPerCm) => { videoPxPerCm = pxPerCm; manualCalToggle.checked = true; setCalBadge(`Manual — ${pxPerCm.toFixed(1)} px/cm`, true); },
+          onCalibrated: (pxPerCm) => { videoPxPerCm = pxPerCm; calSourceInput.value = 'manual'; setCalBadge(`Manual — ${pxPerCm.toFixed(1)} px/cm`, true); },
           onRoiSet: () => {},
+          onFocusTap: (p) => {
+            const hit = hitTestShapes(lastStableShapes, p.x, p.y);
+            focusedTrackId = hit ? hit.id : null;
+            updateFocusChipUI();
+            tool.redraw();
+          },
         });
         setCalBadge(videoPxPerCm ? `${videoPxPerCm.toFixed(1)} px/cm` : 'Buscando calibración…', !!videoPxPerCm);
         videoModeActive = true;
